@@ -39,6 +39,7 @@ services:
     build:
       context: ..
     image: paperdb:prod
+    pull_policy: never
     restart: unless-stopped
     depends_on:
       paperdb-db:
@@ -60,6 +61,7 @@ services:
 
   paperdb-worker:
     image: paperdb:prod
+    pull_policy: never
     restart: unless-stopped
     depends_on:
       paperdb-db:
