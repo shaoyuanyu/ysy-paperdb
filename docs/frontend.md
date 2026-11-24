@@ -760,7 +760,7 @@ const pdf = await getDocument({
 - `/library/papers/[ref]` 详情：卷期页/摘要/作者/CCF/CAS/标识符/标签/集合、状态/评分/星标、上传 PDF、BibTeX 下载、批注列表、参考文献/被引列表。
 - `/library/import`：标识符批量导入、BibTeX 上传、任务轮询与逐条结果；最近导入。
 - `/library/settings`：服务状态、个人 token 创建/撤销、库级导出链接、数据集/存储。
-- `/library/collections`：建集合、树、删除（promote）。
+- `/library/collections`、`/library/views`、`/library/projects`：建/删集合、保存视图（Filter JSON）、建/删项目；详情页可直接加入集合。
 - `/library/papers/[ref]/read`：pdf.js 双页（默认）/单页、页码跳转、深色反色（默认开）、批注叠层、PDF 内全文搜索。
 - 代理 `app/api/library/[...path]/route.ts`：owner-only、路径白名单、同源写请求校验、Range/HEAD、服务 token 仅服务端。
 - 导航：主人专属「文献库」入口；`messages` 增加 `library` 命名空间。
@@ -770,7 +770,7 @@ const pdf = await getDocument({
 
 - 列表暂未接虚拟滚动（`PaperTable` 一次渲染一页 ≤50 条），搜索/分页已可用。
 - 批注创建 UI 尚未接文本选择（后端 API 已就绪，详情/阅读器能展示与跳转）；下一步 M5b 补 selection → rects。
-- 视图/项目创建 UI 未做（API 已就绪），当前只读入口。
+- 视图创建用 Filter JSON 编辑（未做图形化条件构建器）；项目未做“添加集合/置顶论文”的完整管理界面。
 - 代理上传/JSON 已改为流式转发（`req.body` + `duplex: half`）；Nginx 仍需 `proxy_request_buffering off`。
 - 详情页已接参考文献/被引列表；引用关系画布未做（M6 可选）。
 - `/library` metadata `noindex` 尚未加，部署前补。
