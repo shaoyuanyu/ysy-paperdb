@@ -10,13 +10,20 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "uv>=0.5,<1" \
+# 允许在 PyPI 直连较慢的网络（例如国内 VPS）通过 build-arg 切换到镜像站；
+# 默认仍用官方源，保证构建可复现/可审计。例如：
+#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+#                --build-arg UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG UV_INDEX_URL=https://pypi.org/simple
+
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" "uv>=0.5,<1" \
     && groupadd --system --gid 10001 paperdb \
     && useradd --system --uid 10001 --gid paperdb --home-dir /app paperdb
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev \
+RUN UV_INDEX_URL="$UV_INDEX_URL" uv sync --frozen --no-dev \
     && chown -R paperdb:paperdb /app
 
 COPY --chown=paperdb:paperdb alembic.ini ./
