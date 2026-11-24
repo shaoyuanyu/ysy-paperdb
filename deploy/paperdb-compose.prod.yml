@@ -1,0 +1,86 @@
+# Production paperdb stack on the homepage VPS.
+# Run from ~/paperdb:  docker compose -f deploy/paperdb-compose.prod.yml up -d --build
+# Requires:
+#   - ~/paperdb/.env (600) with POSTGRES_PASSWORD / PAPERDB_SERVICE_TOKEN / PAPERDB_TOKEN_PEPPER
+#   - external Docker network personal-homepage_web (created by the site compose)
+#   - ./datasets/{ccf-2026.json,cas-2025.json}
+name: paperdb
+
+x-paperdb-env: &paperdb-env
+  PAPERDB_ENV: prod
+  PAPERDB_SERVICE_TOKEN: ${PAPERDB_SERVICE_TOKEN:?set PAPERDB_SERVICE_TOKEN}
+  PAPERDB_TOKEN_PEPPER: ${PAPERDB_TOKEN_PEPPER:?set PAPERDB_TOKEN_PEPPER}
+  PAPERDB_STORAGE_BACKEND: local
+  PAPERDB_STORAGE_ROOT: /data/files
+  PAPERDB_MAX_UPLOAD_MB: 200
+  PAPERDB_PUBLIC_URL: https://shaoyuanyu.cn
+  OPENALEX_MAILTO: ${OPENALEX_MAILTO:-ysy@shaoyuanyu.cn}
+  CROSSREF_MAILTO: ${CROSSREF_MAILTO:-ysy@shaoyuanyu.cn}
+  ARXIV_USER_AGENT: ${ARXIV_USER_AGENT:-paperdb/0.1 (mailto:ysy@shaoyuanyu.cn)}
+  S2_API_KEY: ${S2_API_KEY:-}
+
+services:
+  paperdb-db:
+    image: docker.io/library/postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paperdb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: paperdb
+    volumes:
+      - paperdb-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperdb -d paperdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  paperdb-api:
+    build:
+      context: .
+    image: paperdb:prod
+    restart: unless-stopped
+    depends_on:
+      paperdb-db:
+        condition: service_healthy
+    environment:
+      <<: *paperdb-env
+      PAPERDB_DATABASE_URL: postgresql+asyncpg://paperdb:${POSTGRES_PASSWORD}@paperdb-db:5432/paperdb
+    ports:
+      - "127.0.0.1:9720:9720"
+    volumes:
+      - paperdb-files:/data
+      - ./datasets:/app/datasets:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9720), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  paperdb-worker:
+    image: paperdb:prod
+    restart: unless-stopped
+    depends_on:
+      paperdb-db:
+        condition: service_healthy
+      paperdb-api:
+        condition: service_healthy
+    command: ["paperdb", "worker"]
+    healthcheck:
+      disable: true
+    environment:
+      <<: *paperdb-env
+      PAPERDB_DATABASE_URL: postgresql+asyncpg://paperdb:${POSTGRES_PASSWORD}@paperdb-db:5432/paperdb
+    volumes:
+      - paperdb-files:/data
+      - ./datasets:/app/datasets:ro
+
+volumes:
+  paperdb-db:
+  paperdb-files:
+
+networks:
+  default:
+    external: true
+    name: personal-homepage_web
