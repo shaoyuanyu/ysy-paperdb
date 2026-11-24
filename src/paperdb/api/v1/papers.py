@@ -21,6 +21,7 @@ from paperdb.auth.tokens import TokenPrincipal
 from paperdb.db.models import PaperState, ReadingStatus
 from paperdb.db.session import get_session
 from paperdb.errors import ApiError
+from paperdb.papers.bibtex import generate_bibtex
 from paperdb.papers.service import (
     create_paper,
     delete_paper,
@@ -191,3 +192,17 @@ async def update_state_endpoint(
         state.archived_at = now if payload.archived else None
     await session.commit()
     return _state_out(state)
+
+
+@router.get("/{ref}/bibtex")
+async def bibtex_endpoint(
+    ref: str,
+    principal: TokenPrincipal = Depends(scoped("papers:read")),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    paper = await get_paper(session, ref)
+    return Response(
+        content=generate_bibtex(paper),
+        media_type="application/x-bibtex",
+        headers={"Content-Type": "application/x-bibtex; charset=utf-8"},
+    )

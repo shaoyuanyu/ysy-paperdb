@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = 200
 
     cors_origins: str = ""
+    public_url: str = "http://127.0.0.1:9720"
 
     # Metadata-source credentials. "me" is an explicit placeholder until a real
     # contact address is configured; ingesters must send it as mailto/User-Agent.

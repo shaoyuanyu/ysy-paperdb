@@ -370,3 +370,34 @@ class ProblemOut(ApiModel):
     detail: str | None = None
     code: str
     request_id: str | None = None
+
+
+class ExportTokenCreate(ApiModel):
+    name: str
+    scope_type: str = "library"
+    scope_id: uuid.UUID | None = None
+    citekey_template: str | None = None
+    include_abstract: bool = False
+
+
+class ExportTokenCreated(ApiModel):
+    id: uuid.UUID
+    name: str
+    prefix: str
+    scope_type: str
+    scope_id: uuid.UUID | None = None
+    url: str
+    created_at: datetime
+
+
+class ExportTokenOut(ApiModel):
+    id: uuid.UUID
+    name: str
+    prefix: str
+    scope_type: str
+    scope_id: uuid.UUID | None = None
+    include_abstract: bool = False
+    created_at: datetime
+    last_accessed_at: datetime | None = None
+    access_count: int = 0
+    revoked_at: datetime | None = None
