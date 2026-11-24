@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: paperdb
+          POSTGRES_PASSWORD: paperdb_dev_password
+          POSTGRES_DB: paperdb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U paperdb -d paperdb_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      PAPERDB_DATABASE_URL: postgresql+asyncpg://paperdb:paperdb_dev_password@127.0.0.1:5432/paperdb_test
+      PAPERDB_SERVICE_TOKEN: pdb_svc_test0123456789abcdef0123456789abcdef
+      PAPERDB_TOKEN_PEPPER: test-pepper-0123456789abcdef0123456789
+      PAPERDB_STORAGE_BACKEND: local
+      PAPERDB_STORAGE_ROOT: ./.test-storage
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen --extra dev
+      - name: Lint
+        run: |
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+      - name: Typecheck
+        run: uv run pyright
+      - name: Migration
+        run: uv run alembic upgrade head
+      - name: Tests
+        run: uv run pytest -q
+      - name: Image build
+        run: docker build -t paperdb:ci .

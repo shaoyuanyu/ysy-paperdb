@@ -54,7 +54,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9720/readyz', timeout=3)",
+          "import socket; socket.create_connection(('127.0.0.1', 9720), 3).close()",
         ]
       interval: 30s
       timeout: 5s
