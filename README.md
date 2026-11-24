@@ -1,8 +1,9 @@
 # paperdb
 
-CS-native literature library backend. M1 scaffold: FastAPI + async SQLAlchemy +
-PostgreSQL, bearer-token auth, local content-addressed storage, CCF/CAS dataset
-import, and minimal papers/venues/authors CRUD.
+CS-native literature library backend (M1–M7): FastAPI + async SQLAlchemy +
+PostgreSQL, bearer-token auth, CCF/CAS evaluation, venue normalization, metadata
+resolve/import, collections/tags/views/projects, PDF fulltext/annotations, and
+OpenAlex citation graph.
 
 See [docs/README.md](docs/README.md) for the full design; implementation notes: [M1](docs/M1.md), [M2](docs/M2.md), [M3](docs/M3.md), [M4](docs/M4.md), [M6](docs/M6.md), [deploy](docs/deploy.md).
 
@@ -28,13 +29,14 @@ UV_CACHE_DIR=$PWD/.uv-cache uv run paperdb datasets import \
 UV_CACHE_DIR=$PWD/.uv-cache uv run paperdb datasets import \
   --scheme cas --version 2025 --file datasets/cas-2025.json --valid-from 2025
 
-# 4. Run
+# 4. Run API (terminal A) and worker (terminal B)
 UV_CACHE_DIR=$PWD/.uv-cache uv run uvicorn paperdb.main:app --reload --port 9720
+UV_CACHE_DIR=$PWD/.uv-cache uv run paperdb worker
 ```
 
 OpenAPI: <http://127.0.0.1:9720/docs>.
 
-## Compose (API + Postgres)
+## Compose (API + worker + Postgres)
 
 ```bash
 cp .env.example .env   # set PAPERDB_SERVICE_TOKEN / PAPERDB_TOKEN_PEPPER / POSTGRES_PASSWORD
@@ -77,15 +79,21 @@ src/paperdb/
   storage/           StorageBackend + content-addressed local backend
   venues/            name/ISSN normalization, CCF/CAS import, rank resolver
   papers/            paper CRUD, citekey, evaluation serialization
+  ingest/            Crossref/arXiv/DBLP/OpenAlex/S2/ACL/OpenReview resolve
+  imports/           identifier/BibTeX import jobs
+  organize/          collections/tags/views/projects/auto-rules/filter DSL
+  pdf/               PyMuPDF extraction, PDF/annotation/search services
+  citations/         OpenAlex citation sync
+  jobs/              Postgres queue + worker
   api/v1/            routers + Pydantic schemas
-  cli.py             paperdb datasets/db/serve commands
+  cli.py             paperdb datasets/db/serve/worker commands
 alembic/             migrations
 datasets/            CCF 2026 / CAS 2025 snapshots (do not publish)
 docs/                design docs (moved from the homepage repo)
 tests/               unit + Postgres integration tests
 ```
 
-## Status (M1 + M2)
+## Status (M1–M7)
 
 Done and verified locally against PostgreSQL 17:
 

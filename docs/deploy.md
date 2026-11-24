@@ -27,8 +27,8 @@ curl -fsS http://127.0.0.1:9720/readyz
 导入 CCF/CAS 数据集（示例；数据集不随公共镜像发布）：
 
 ```bash
-podman compose exec paperdb-api paperdb datasets import ccf --path /app/datasets/ccf/ccf-2026.csv --version 2026 --valid-from 2026
-podman compose exec paperdb-api paperdb datasets import cas --path /app/datasets/cas/cas-2025.csv --version 2025 --valid-from 2025
+podman compose exec paperdb-api paperdb datasets import ccf --file /app/datasets/ccf-2026.json --version 2026 --valid-from 2026
+podman compose exec paperdb-api paperdb datasets import cas --file /app/datasets/cas-2025.json --version 2025 --valid-from 2025
 podman compose exec paperdb-api paperdb datasets list
 ```
 
