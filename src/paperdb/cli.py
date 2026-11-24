@@ -112,6 +112,16 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _worker(args: argparse.Namespace) -> int:
+    from paperdb.jobs.worker import run_forever
+
+    try:
+        asyncio.run(run_forever(interval=args.interval))
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="paperdb", description="paperdb backend CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -144,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--reload", action="store_true")
     serve.add_argument("--log-level", default="info")
     serve.set_defaults(func=_serve)
+
+    worker = sub.add_parser("worker", help="run the Postgres job worker")
+    worker.add_argument("--interval", type=float, default=1.0)
+    worker.set_defaults(func=_worker)
 
     return parser
 

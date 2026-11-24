@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.api.deps import scoped
 from paperdb.api.schemas import (
+    DuplicateOut,
+    EnrichCreated,
+    MergeRequest,
     PaperCreate,
     PaperDetail,
     PaperPage,
@@ -21,12 +24,15 @@ from paperdb.auth.tokens import TokenPrincipal
 from paperdb.db.models import PaperState, ReadingStatus
 from paperdb.db.session import get_session
 from paperdb.errors import ApiError
+from paperdb.jobs.queue import enqueue
 from paperdb.papers.bibtex import generate_bibtex
 from paperdb.papers.service import (
     create_paper,
     delete_paper,
+    find_duplicates,
     get_paper,
     list_papers,
+    merge_papers,
     paper_to_detail,
     paper_to_summary,
     ranks_for_venues,
@@ -206,3 +212,57 @@ async def bibtex_endpoint(
         media_type="application/x-bibtex",
         headers={"Content-Type": "application/x-bibtex; charset=utf-8"},
     )
+
+
+@router.get("/{ref}/duplicates", response_model=list[DuplicateOut])
+async def duplicates_endpoint(
+    ref: str,
+    principal: TokenPrincipal = Depends(scoped("papers:read")),
+    session: AsyncSession = Depends(get_session),
+) -> list[DuplicateOut]:
+    paper = await get_paper(session, ref)
+    duplicates = await find_duplicates(session, paper)
+    ranks = await ranks_for_venues(
+        session, [item.paper.venue_id for item in duplicates if item.paper.venue_id]
+    )
+    return [
+        DuplicateOut(
+            paper=PaperSummary.model_validate(paper_to_summary(item.paper, ranks)),
+            score=item.score,
+            reasons=item.reasons,
+        )
+        for item in duplicates
+    ]
+
+
+@router.post("/{ref}/merge", response_model=PaperDetail)
+async def merge_endpoint(
+    ref: str,
+    payload: MergeRequest,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+) -> PaperDetail:
+    source = await get_paper(session, ref)
+    target = await get_paper(session, str(payload.into))
+    fields = payload.fields or {}
+    await merge_papers(
+        session,
+        source,
+        target,
+        title_from_source=fields.get("title") == "source",
+        abstract_from_source=fields.get("abstract") == "source",
+    )
+    await session.commit()
+    return await _detail(session, str(target.id))
+
+
+@router.post("/{ref}/enrich", response_model=EnrichCreated, status_code=status.HTTP_202_ACCEPTED)
+async def enrich_endpoint(
+    ref: str,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+) -> EnrichCreated:
+    paper = await get_paper(session, ref)
+    job = await enqueue(session, "enrich_paper", {"paper_id": str(paper.id)})
+    await session.commit()
+    return EnrichCreated(job_id=job.id, paper_id=paper.id)

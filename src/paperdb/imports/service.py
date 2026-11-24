@@ -1,0 +1,428 @@
+"""Import job orchestration (identifiers now; BibTeX/PDF next)."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from paperdb.api.schemas import (
+    IdentifierInput,
+    ImportIdentifiersRequest,
+    ImportItemOut,
+    ImportJobOut,
+    PaperAuthorInput,
+    PaperCreate,
+)
+from paperdb.config import Settings
+from paperdb.db.models import (
+    ImportItem,
+    ImportItemStatus,
+    ImportJob,
+    ImportKind,
+    JobStatus,
+    Paper,
+)
+from paperdb.errors import ApiError
+from paperdb.ingest.resolve import evaluate_venue, find_duplicate, resolve_input, suggest_venue
+from paperdb.ingest.types import Candidate
+from paperdb.ingest.venue_resolve import ensure_venue
+from paperdb.jobs.queue import enqueue
+from paperdb.papers.bibtex_import import (
+    entry_as_json,
+    entry_from_json,
+    entry_to_candidate,
+    parse_bibtex,
+)
+from paperdb.papers.service import create_paper
+
+
+def _stats(items: list[ImportItem]) -> dict[str, int]:
+    return {
+        "total": len(items),
+        "created": sum(1 for item in items if item.status == ImportItemStatus.created),
+        "duplicates": sum(1 for item in items if item.status == ImportItemStatus.duplicate),
+        "failed": sum(1 for item in items if item.status == ImportItemStatus.failed),
+        "pending": sum(1 for item in items if item.status == ImportItemStatus.pending),
+        "skipped": sum(1 for item in items if item.status == ImportItemStatus.skipped),
+    }
+
+
+async def create_import_job(
+    session: AsyncSession,
+    payload: ImportIdentifiersRequest,
+    *,
+    token_id: str | None = None,
+) -> tuple[ImportJob, uuid.UUID]:
+    import_job = ImportJob(
+        id=uuid.uuid4(),
+        kind=ImportKind.identifiers,
+        status=JobStatus.pending,
+        input={
+            "options": {
+                "onDuplicate": payload.options.on_duplicate,
+                "defaultTags": payload.options.default_tags,
+            }
+        },
+        stats={},
+        created_by_token_id=uuid.UUID(token_id) if token_id else None,
+    )
+    import_job.items = [
+        ImportItem(id=uuid.uuid4(), ordinal=index, raw_input=raw.strip())
+        for index, raw in enumerate(payload.items, start=1)
+    ]
+    import_job.stats = _stats(import_job.items)
+    session.add(import_job)
+    await session.flush()
+    job = await enqueue(
+        session,
+        "import_identifiers",
+        {"import_id": str(import_job.id)},
+    )
+    import_job.job_id = job.id
+    await session.flush()
+    return import_job, job.id
+
+
+def import_to_out(import_job: ImportJob) -> ImportJobOut:
+    return ImportJobOut(
+        id=import_job.id,
+        kind=import_job.kind.value,
+        status=import_job.status.value,
+        stats=import_job.stats or {},
+        created_at=import_job.created_at,
+        started_at=import_job.started_at,
+        finished_at=import_job.finished_at,
+        error_summary=import_job.error_summary,
+    )
+
+
+def item_to_out(item: ImportItem) -> ImportItemOut:
+    return ImportItemOut(
+        id=item.id,
+        ordinal=item.ordinal,
+        raw_input=item.raw_input,
+        status=item.status.value,
+        paper_id=item.paper_id,
+        error=item.error,
+        attempts=item.attempts,
+    )
+
+
+def _paper_payload(
+    candidate: Candidate, venue_id: uuid.UUID | None, edition_id: uuid.UUID | None
+) -> PaperCreate:
+    return PaperCreate(
+        kind=candidate.kind,
+        title=candidate.title,
+        abstract=candidate.abstract,
+        year=candidate.year,
+        publication_date=candidate.publication_date,
+        venue_id=venue_id,
+        venue_edition_id=edition_id,
+        volume=candidate.volume,
+        issue=candidate.issue,
+        pages=candidate.pages,
+        citekey=candidate.citekey,
+        added_via="import",
+        authors=[
+            PaperAuthorInput(
+                display_name=author.name,
+                family_name=author.family,
+                given_name=author.given,
+                orcid=author.orcid,
+                dblp_pid=author.dblp_pid,
+                s2_author_id=author.s2_author_id,
+                openalex_id=author.openalex_id,
+                affiliation=author.affiliation,
+                position=index,
+            )
+            for index, author in enumerate(candidate.authors, start=1)
+        ],
+        identifiers=[
+            IdentifierInput(
+                scheme=str(identifier["scheme"]),
+                value=str(identifier["value"]),
+                is_primary=bool(identifier.get("isPrimary")),
+            )
+            for identifier in candidate.identifiers
+        ],
+    )
+
+
+async def process_import(
+    session: AsyncSession,
+    import_id: uuid.UUID,
+    settings: Settings,
+) -> ImportJob:
+    import_job = await session.get(ImportJob, import_id)
+    if import_job is None:
+        raise ApiError(404, "not_found", "Import job not found")
+    items = list(
+        (
+            await session.scalars(
+                select(ImportItem)
+                .where(ImportItem.job_id == import_id)
+                .order_by(ImportItem.ordinal)
+            )
+        ).all()
+    )
+    import_job.status = JobStatus.running
+    import_job.started_at = import_job.started_at or datetime.now(UTC)
+    await session.flush()
+
+    for item in items:
+        if item.status not in {ImportItemStatus.pending, ImportItemStatus.failed}:
+            continue
+        item.attempts += 1
+        item.error = None
+        try:
+            candidate, warnings = await resolve_input(session, item.raw_input, settings)
+            if candidate is None:
+                raise ApiError(422, "resolve_failed", "; ".join(warnings) or "metadata not found")
+            if candidate.duplicate_of:
+                existing = await session.get(Paper, uuid.UUID(candidate.duplicate_of["paperId"]))
+                item.status = ImportItemStatus.duplicate
+                item.paper_id = existing.id if existing else None
+            else:
+                venue = None
+                edition = None
+                if candidate.venue is not None:
+                    venue, edition = await ensure_venue(
+                        session,
+                        candidate.venue,
+                        raw_name=candidate._venue_name,
+                        kind=candidate.kind,
+                        year=candidate.year,
+                        dblp_venue_key=candidate._dblp_venue_key,
+                        edition_dblp_key=candidate._edition_key,
+                    )
+                paper = await create_paper(
+                    session,
+                    _paper_payload(
+                        candidate,
+                        venue.id if venue else None,
+                        edition.id if edition else None,
+                    ),
+                )
+                item.status = ImportItemStatus.created
+                item.paper_id = paper.id
+        except ApiError as exc:
+            item.status = ImportItemStatus.failed
+            item.error = str(exc.detail or exc.title)
+        except Exception as exc:  # pragma: no cover - defensive boundary per item
+            item.status = ImportItemStatus.failed
+            item.error = f"internal: {exc}"
+        import_job.stats = _stats(items)
+        await session.commit()
+
+    import_job.status = (
+        JobStatus.succeeded if import_job.stats.get("failed", 0) == 0 else JobStatus.failed
+    )
+    import_job.finished_at = datetime.now(UTC)
+    import_job.error_summary = (
+        f"{import_job.stats.get('failed', 0)} item(s) failed"
+        if import_job.stats.get("failed", 0)
+        else None
+    )
+    await session.commit()
+    return import_job
+
+
+async def retry_item(session: AsyncSession, import_job: ImportJob, item: ImportItem) -> uuid.UUID:
+    if item.status != ImportItemStatus.failed:
+        raise ApiError(422, "not_retryable", "Only failed items can be retried")
+    item.status = ImportItemStatus.pending
+    item.error = None
+    import_job.stats = _stats(list(import_job.items))
+    import_job.status = JobStatus.pending
+    job = await enqueue(session, "import_identifiers", {"import_id": str(import_job.id)})
+    import_job.job_id = job.id
+    await session.flush()
+    return job.id
+
+
+async def cancel_import(session: AsyncSession, import_job: ImportJob) -> None:
+    import_job.status = JobStatus.dead
+    import_job.finished_at = datetime.now(UTC)
+    for item in import_job.items:
+        if item.status == ImportItemStatus.pending:
+            item.status = ImportItemStatus.skipped
+    import_job.stats = _stats(list(import_job.items))
+    await session.flush()
+
+
+async def create_bibtex_import_job(
+    session: AsyncSession,
+    text: str,
+    *,
+    token_id: str | None = None,
+) -> tuple[ImportJob, uuid.UUID]:
+    try:
+        entries = parse_bibtex(text)
+    except ValueError as exc:
+        raise ApiError(422, "invalid_bibtex", str(exc)) from exc
+    if not entries:
+        raise ApiError(422, "invalid_bibtex", "No BibTeX entries found")
+    if len(entries) > 500:
+        raise ApiError(422, "too_many_entries", "At most 500 entries per import")
+    import_job = ImportJob(
+        id=uuid.uuid4(),
+        kind=ImportKind.bibtex,
+        status=JobStatus.pending,
+        input={"entries": len(entries)},
+        stats={},
+        created_by_token_id=uuid.UUID(token_id) if token_id else None,
+    )
+    import_job.items = [
+        ImportItem(id=uuid.uuid4(), ordinal=index, raw_input=entry_as_json(entry))
+        for index, entry in enumerate(entries, start=1)
+    ]
+    import_job.stats = _stats(import_job.items)
+    session.add(import_job)
+    await session.flush()
+    job = await enqueue(session, "import_bibtex", {"import_id": str(import_job.id)})
+    import_job.job_id = job.id
+    await session.flush()
+    return import_job, job.id
+
+
+async def _bib_venue(session: AsyncSession, candidate: Candidate) -> None:
+    if candidate.venue is None and candidate._venue_name:
+        candidate.venue = await suggest_venue(
+            session,
+            raw_name=candidate._venue_name,
+            kind=candidate.kind,
+            year=candidate.year,
+        )
+    if candidate.venue and candidate.venue.venue_id:
+        candidate.evaluation = await evaluate_venue(
+            session, candidate.venue.venue_id, candidate.year
+        )
+    candidate.duplicate_of = await find_duplicate(session, candidate.identifiers)
+
+
+async def process_bibtex(
+    session: AsyncSession,
+    import_id: uuid.UUID,
+    settings: Settings,
+) -> ImportJob:
+    import_job = await session.get(ImportJob, import_id)
+    if import_job is None:
+        raise ApiError(404, "not_found", "Import job not found")
+    items = list(
+        (
+            await session.scalars(
+                select(ImportItem)
+                .where(ImportItem.job_id == import_id)
+                .order_by(ImportItem.ordinal)
+            )
+        ).all()
+    )
+    import_job.status = JobStatus.running
+    import_job.started_at = import_job.started_at or datetime.now(UTC)
+    await session.flush()
+
+    for item in items:
+        if item.status not in {ImportItemStatus.pending, ImportItemStatus.failed}:
+            continue
+        item.attempts += 1
+        item.error = None
+        try:
+            entry = entry_from_json(item.raw_input)
+            bib_candidate = entry_to_candidate(entry)
+            if bib_candidate is None:
+                raise ApiError(422, "invalid_bibtex_entry", "Entry has no title")
+            candidate = bib_candidate
+            doi = next(
+                (
+                    str(identifier["value"])
+                    for identifier in bib_candidate.identifiers
+                    if identifier["scheme"] == "doi"
+                ),
+                None,
+            )
+            arxiv = next(
+                (
+                    str(identifier["value"])
+                    for identifier in bib_candidate.identifiers
+                    if identifier["scheme"] == "arxiv"
+                ),
+                None,
+            )
+            if doi or arxiv:
+                resolved, _warnings = await resolve_input(
+                    session, f"doi:{doi}" if doi else f"arxiv:{arxiv}", settings
+                )
+                if resolved is not None:
+                    candidate = resolved
+            candidate.citekey = bib_candidate.citekey or candidate.citekey
+            if bib_candidate.kind != "preprint" and candidate.kind == "preprint":
+                candidate.kind = bib_candidate.kind
+                candidate._venue_name = bib_candidate._venue_name
+            if candidate.venue is None:
+                await _bib_venue(session, candidate)
+            else:
+                candidate.duplicate_of = await find_duplicate(session, candidate.identifiers)
+            if candidate.duplicate_of:
+                existing = await session.get(Paper, uuid.UUID(candidate.duplicate_of["paperId"]))
+                item.status = ImportItemStatus.duplicate
+                item.paper_id = existing.id if existing else None
+            else:
+                venue = None
+                edition = None
+                if candidate.venue is not None:
+                    venue, edition = await ensure_venue(
+                        session,
+                        candidate.venue,
+                        raw_name=candidate._venue_name,
+                        kind=candidate.kind,
+                        year=candidate.year,
+                        dblp_venue_key=candidate._dblp_venue_key,
+                        edition_dblp_key=candidate._edition_key,
+                    )
+                try:
+                    paper = await create_paper(
+                        session,
+                        _paper_payload(
+                            candidate,
+                            venue.id if venue else None,
+                            edition.id if edition else None,
+                        ),
+                    )
+                except ApiError as exc:
+                    if exc.code != "citekey_conflict" or not candidate.citekey:
+                        raise
+                    candidate.citekey = None
+                    paper = await create_paper(
+                        session,
+                        _paper_payload(
+                            candidate,
+                            venue.id if venue else None,
+                            edition.id if edition else None,
+                        ),
+                    )
+                item.status = ImportItemStatus.created
+                item.paper_id = paper.id
+        except ApiError as exc:
+            item.status = ImportItemStatus.failed
+            item.error = str(exc.detail or exc.title)
+        except Exception as exc:
+            item.status = ImportItemStatus.failed
+            item.error = f"internal: {exc}"
+        import_job.stats = _stats(items)
+        await session.commit()
+
+    import_job.status = (
+        JobStatus.succeeded if import_job.stats.get("failed", 0) == 0 else JobStatus.failed
+    )
+    import_job.finished_at = datetime.now(UTC)
+    import_job.error_summary = (
+        f"{import_job.stats.get('failed', 0)} item(s) failed"
+        if import_job.stats.get("failed", 0)
+        else None
+    )
+    await session.commit()
+    return import_job

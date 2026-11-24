@@ -4,7 +4,7 @@ CS-native literature library backend. M1 scaffold: FastAPI + async SQLAlchemy +
 PostgreSQL, bearer-token auth, local content-addressed storage, CCF/CAS dataset
 import, and minimal papers/venues/authors CRUD.
 
-See [docs/README.md](docs/README.md) for the full design.
+See [docs/README.md](docs/README.md) for the full design; implementation notes: [M1](docs/M1.md), [M2](docs/M2.md).
 
 ## Quickstart (local, Podman Postgres)
 
@@ -85,7 +85,7 @@ docs/                design docs (moved from the homepage repo)
 tests/               unit + Postgres integration tests
 ```
 
-## M1 status
+## Status (M1 + M2)
 
 Done and verified locally against PostgreSQL 17:
 
@@ -95,16 +95,17 @@ Done and verified locally against PostgreSQL 17:
 - CAS 2025 import: 547 new venues + 211 exact-name matches / 2060 rank rows
 - paper CRUD; venue/author create/read/update; citekey generation; CCF/CAS evaluation resolution
   (including `valid_from` fallback), cursor pagination
+- resolve/enrich: Crossref, arXiv, DBLP search/record, OpenAlex, S2, ACL `.bib`, OpenReview
+- Postgres job queue + worker; identifier/BibTeX imports; dedupe/merge; BibTeX export
 - OpenAPI at `/openapi.json`; local content-addressed `StorageBackend`
 - Alembic migration, Dockerfile, compose, entrypoint migration, Podman image build verified
-- 29 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
+- 40 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
 
-M1 intentionally does **not** include resolve/enrich (Crossref/arXiv/DBLP/...),
-BibTeX import/export, PDF files/annotations, collections/tags/views, or the
-Postgres job queue. Those start at M2–M4 per docs/README.md §9.
+M2 intentionally does **not** include collections/tags/views (M3), PDF
+files/annotations/reader (M4–M5b), citation sync (M6), or the frontend (M5a).
 
-Next (M2): Crossref/arXiv/DBLP/OpenAlex/S2 resolve pipeline, venue normalization
-helpers, duplicate detection/merge, BibTeX import, Postgres-backed jobs/worker.
+Next: M3 organization model and API (collections, namespaced hierarchical tags,
+saved views/filter DSL, projects, auto-rules), then M4 PDF.
 
 ## Development
 

@@ -161,6 +161,10 @@ class PaperAuthorInput(ApiModel):
     is_corresponding: bool = False
     equal_contribution: bool = False
     affiliation: str | None = None
+    orcid: str | None = None
+    dblp_pid: str | None = None
+    s2_author_id: str | None = None
+    openalex_id: str | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -450,3 +454,124 @@ class AuthorUpdate(ApiModel):
     openalex_id: str | None = None
     homepage_url: str | None = None
     is_me: bool | None = None
+
+
+class ResolveRequest(ApiModel):
+    input: str
+    kind: str = "auto"
+
+
+class CandidateAuthorOut(ApiModel):
+    display_name: str
+    family_name: str | None = None
+    given_name: str | None = None
+    orcid: str | None = None
+    dblp_pid: str | None = None
+    s2_author_id: str | None = None
+    openalex_id: str | None = None
+    affiliation: str | None = None
+
+
+class VenueSuggestionOut(ApiModel):
+    venue_id: str | None = None
+    full_name: str
+    abbrev: str | None = None
+    kind: str
+    year: int | None = None
+    track: str = "main"
+    confidence: float = 0.5
+    evidence: str = "unmatched"
+
+
+class ResolveCandidateOut(ApiModel):
+    confidence: float
+    sources: list[str]
+    kind: str
+    title: str
+    abstract: str | None = None
+    year: int
+    publication_date: date | None = None
+    authors: list[CandidateAuthorOut] = Field(default_factory=list)
+    identifiers: list[IdentifierInput] = Field(default_factory=list)
+    venue: VenueSuggestionOut | None = None
+    evaluation: Evaluation
+    duplicate_of: dict[str, str] | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResolveResponse(ApiModel):
+    input: dict[str, str]
+    candidates: list[ResolveCandidateOut]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ImportOptions(ApiModel):
+    on_duplicate: Literal["skip", "link", "create"] = "skip"
+    default_tags: list[str] = Field(default_factory=list)
+
+
+class ImportIdentifiersRequest(ApiModel):
+    items: list[str] = Field(min_length=1, max_length=500)
+    options: ImportOptions = Field(default_factory=ImportOptions)
+
+
+class ImportCreated(ApiModel):
+    import_id: uuid.UUID
+    job_id: uuid.UUID
+    status: str
+    items: int
+
+
+class ImportItemOut(ApiModel):
+    id: uuid.UUID
+    ordinal: int
+    raw_input: str
+    status: str
+    paper_id: uuid.UUID | None = None
+    error: str | None = None
+    attempts: int = 0
+
+
+class ImportJobOut(ApiModel):
+    id: uuid.UUID
+    kind: str
+    status: str
+    stats: dict[str, int] = Field(default_factory=dict)
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_summary: str | None = None
+
+
+class ImportPage(ApiModel):
+    items: list[ImportJobOut]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class JobOut(ApiModel):
+    id: uuid.UUID
+    kind: str
+    status: str
+    attempts: int
+    max_attempts: int
+    last_error: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+
+
+class DuplicateOut(ApiModel):
+    paper: PaperSummary
+    score: float
+    reasons: list[str] = Field(default_factory=list)
+
+
+class MergeRequest(ApiModel):
+    into: uuid.UUID
+    fields: dict[str, str] | None = None
+    delete_source: bool = True
+
+
+class EnrichCreated(ApiModel):
+    job_id: uuid.UUID
+    paper_id: uuid.UUID

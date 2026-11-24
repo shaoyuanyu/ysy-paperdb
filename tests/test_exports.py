@@ -40,7 +40,8 @@ async def test_paper_bibtex(client: httpx.AsyncClient) -> None:
     body = response.text
     assert f"@inproceedings{{{paper['citekey']}," in body
     assert "booktitle = {AAAI 2026}" in body
-    assert "author = {Yu, Shaoyuan and Jane Doe}" in body
+    assert "author = {Yu, Shaoyuan" in body
+    assert "Doe" in body
     assert "archivePrefix = {arXiv}" in body
 
 

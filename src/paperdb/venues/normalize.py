@@ -13,6 +13,10 @@ def normalize_name(value: str) -> str:
     text = unicodedata.normalize("NFKC", value).lower().strip()
     if text.startswith("the "):
         text = text[4:]
+    for prefix in ("in proceedings of the ", "proceedings of the ", "proceedings of "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+            break
     text = text.replace("&", " and ")
     text = _YEAR_RE.sub(" ", text)
     text = _ORDINAL_RE.sub(" ", text)

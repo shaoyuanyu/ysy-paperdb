@@ -5,7 +5,9 @@ import json
 import re
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from difflib import SequenceMatcher
 from typing import Any
 
 from sqlalchemy import Select, and_, func, or_, select
@@ -22,6 +24,7 @@ from paperdb.db.models import (
     Author,
     AuthorStatus,
     IdentifierScheme,
+    MergeRedirect,
     Paper,
     PaperAuthor,
     PaperIdentifier,
@@ -147,12 +150,26 @@ async def _get_or_create_author(session: AsyncSession, data: PaperAuthorInput) -
         .limit(1)
     )
     if existing is not None:
+        for field in (
+            "family_name",
+            "given_name",
+            "orcid",
+            "dblp_pid",
+            "s2_author_id",
+            "openalex_id",
+        ):
+            if getattr(existing, field) is None and getattr(data, field):
+                setattr(existing, field, getattr(data, field))
         return existing
     author = Author(
         id=uuid.uuid4(),
         display_name=display_name,
         family_name=data.family_name,
         given_name=data.given_name,
+        orcid=data.orcid,
+        dblp_pid=data.dblp_pid,
+        s2_author_id=data.s2_author_id,
+        openalex_id=data.openalex_id,
         status=AuthorStatus.provisional,
     )
     session.add(author)
@@ -347,15 +364,25 @@ def _new_state(paper: Paper, data: StateInput) -> PaperState:
 
 
 async def get_paper(session: AsyncSession, ref: str, *, include_deleted: bool = False) -> Paper:
-    condition = None
+    paper_id: uuid.UUID | None = None
     try:
-        condition = Paper.id == uuid.UUID(ref)
+        paper_id = uuid.UUID(ref)
+        condition = Paper.id == paper_id
     except ValueError:
         condition = Paper.citekey == ref
-    stmt = select(Paper).options(*PAPER_OPTIONS).where(condition)
+    stmt = (
+        select(Paper)
+        .options(*PAPER_OPTIONS)
+        .where(condition)
+        .execution_options(populate_existing=True)
+    )
     if not include_deleted:
         stmt = stmt.where(Paper.deleted_at.is_(None))
     paper = await session.scalar(stmt)
+    if paper is None and paper_id is not None:
+        redirect = await session.get(MergeRedirect, ("paper", paper_id))
+        if redirect is not None:
+            return await get_paper(session, str(redirect.new_id), include_deleted=include_deleted)
     if paper is None:
         raise ApiError(404, "not_found", "Paper not found")
     return paper
@@ -404,7 +431,7 @@ async def update_paper(session: AsyncSession, paper: Paper, data: PaperUpdate) -
             raise ApiError(409, "citekey_conflict", f"Citekey already used: {candidate}")
         paper.citekey = candidate
 
-    if "venue_id" in fields or "venue_edition_id" in fields:
+    if "venue_id" in fields or "venue_edition_id" in fields or "kind" in fields:
         venue_id = data.venue_id if "venue_id" in fields else paper.venue_id
         edition_id = (
             data.venue_edition_id if "venue_edition_id" in fields else paper.venue_edition_id
@@ -620,3 +647,124 @@ async def list_papers(
 
 def today(value: date | None) -> date | None:
     return value
+
+
+@dataclass(slots=True)
+class DuplicateCandidate:
+    paper: Paper
+    score: float
+    reasons: list[str]
+
+
+def _first_author_family(paper: Paper) -> str | None:
+    for link in sorted(paper.authors, key=lambda item: item.position):
+        if link.author.family_name:
+            return normalize_title(link.author.family_name)
+        return normalize_title(link.author.display_name.split(" ")[-1])
+    return None
+
+
+async def find_duplicates(
+    session: AsyncSession, paper: Paper, *, limit: int = 10
+) -> list[DuplicateCandidate]:
+    stmt = (
+        select(Paper)
+        .options(*PAPER_OPTIONS)
+        .where(
+            Paper.id != paper.id,
+            Paper.deleted_at.is_(None),
+            or_(
+                Paper.title_normalized == paper.title_normalized,
+                and_(Paper.year >= paper.year - 1, Paper.year <= paper.year + 1),
+            ),
+        )
+        .limit(100)
+    )
+    rows = list((await session.scalars(stmt)).all())
+    target_first = _first_author_family(paper)
+    results: list[DuplicateCandidate] = []
+    for row in rows:
+        ratio = SequenceMatcher(None, paper.title_normalized, row.title_normalized).ratio()
+        reasons: list[str] = []
+        score = ratio
+        if row.title_normalized == paper.title_normalized:
+            reasons.append("exact-title")
+            score = max(score, 0.98)
+        elif ratio >= 0.9:
+            reasons.append("similar-title")
+        if abs(row.year - paper.year) <= 1:
+            reasons.append("year-proximity")
+            score = min(1.0, score + 0.03)
+        row_first = _first_author_family(row)
+        if target_first and row_first and target_first == row_first:
+            reasons.append("first-author")
+            score = min(1.0, score + 0.05)
+        if score >= 0.86:
+            results.append(DuplicateCandidate(paper=row, score=round(score, 3), reasons=reasons))
+    results.sort(key=lambda item: item.score, reverse=True)
+    return results[:limit]
+
+
+async def merge_papers(
+    session: AsyncSession,
+    source: Paper,
+    target: Paper,
+    *,
+    title_from_source: bool = False,
+    abstract_from_source: bool = False,
+) -> Paper:
+    if source.id == target.id:
+        raise ApiError(422, "invalid_merge", "Cannot merge a paper into itself")
+    if title_from_source and source.title:
+        target.title = source.title
+        target.title_normalized = source.title_normalized
+    if abstract_from_source and source.abstract:
+        target.abstract = source.abstract
+
+    target_identifiers = {
+        (identifier.scheme, identifier.normalized) for identifier in target.identifiers
+    }
+    for identifier in list(source.identifiers):
+        key = (identifier.scheme, identifier.normalized)
+        if key in target_identifiers:
+            await session.delete(identifier)
+            continue
+        identifier.paper_id = target.id
+        target_identifiers.add(key)
+
+    target_author_ids = {link.author_id for link in target.authors}
+    next_position = max((link.position for link in target.authors), default=0) + 1
+    for link in sorted(source.authors, key=lambda item: item.position):
+        if link.author_id in target_author_ids:
+            continue
+        target.authors.append(
+            PaperAuthor(
+                paper=target,
+                author_id=link.author_id,
+                position=next_position,
+                is_corresponding=link.is_corresponding,
+                equal_contribution=link.equal_contribution,
+                affiliation_text=link.affiliation_text,
+                raw_name=link.raw_name,
+            )
+        )
+        target_author_ids.add(link.author_id)
+        next_position += 1
+    for link in list(source.authors):
+        await session.delete(link)
+
+    if target.state is None and source.state is not None:
+        source.state.paper_id = target.id
+    target.user_locked_fields = list(
+        dict.fromkeys([*target.user_locked_fields, *source.user_locked_fields])
+    )
+    target.version += 1
+    source.deleted_at = datetime.now(UTC)
+    source.version += 1
+    session.add(MergeRedirect(entity_type="paper", old_id=source.id, new_id=target.id))
+    await session.flush()
+    target.paper_author_names = ", ".join(
+        link.author.display_name for link in sorted(target.authors, key=lambda item: item.position)
+    )
+    await session.flush()
+    return target

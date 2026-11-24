@@ -99,6 +99,28 @@ class AuthorStatus(StrEnum):
     merged = "merged"
 
 
+class JobStatus(StrEnum):
+    pending = "pending"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    dead = "dead"
+
+
+class ImportKind(StrEnum):
+    identifiers = "identifiers"
+    bibtex = "bibtex"
+    pdf = "pdf"
+
+
+class ImportItemStatus(StrEnum):
+    pending = "pending"
+    created = "created"
+    duplicate = "duplicate"
+    failed = "failed"
+    skipped = "skipped"
+
+
 def _enum(enum_cls: type[StrEnum], name: str, length: int = 32) -> Enum:
     return Enum(
         enum_cls,
@@ -524,3 +546,93 @@ class ExportToken(UUIDPrimaryKey, Base):
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     access_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Job(UUIDPrimaryKey, Base):
+    __tablename__ = "job"
+    __table_args__ = (
+        Index(
+            "ix_job_claim",
+            "status",
+            "run_at",
+            postgresql_where=text("status IN ('pending','failed')"),
+        ),
+        Index("ix_job_kind_status", "kind", "status"),
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+    )
+
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        _enum(JobStatus, "job_status", 16), default=JobStatus.pending, nullable=False
+    )
+    priority: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+    run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(SmallInteger, default=5, nullable=False)
+    locked_by: Mapped[str | None] = mapped_column(String(64))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ImportJob(UUIDPrimaryKey, Base):
+    __tablename__ = "import_job"
+
+    job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("job.id"))
+    kind: Mapped[ImportKind] = mapped_column(_enum(ImportKind, "import_kind", 16), nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        _enum(JobStatus, "job_status", 16), default=JobStatus.pending, nullable=False
+    )
+    input: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    error_summary: Mapped[str | None] = mapped_column(Text)
+    created_by_token_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    items: Mapped[list[ImportItem]] = relationship(
+        back_populates="import_job", cascade="all, delete-orphan"
+    )
+
+
+class ImportItem(UUIDPrimaryKey, Base):
+    __tablename__ = "import_item"
+    __table_args__ = (
+        UniqueConstraint("job_id", "ordinal", name="uq_import_item_ordinal"),
+        Index("ix_import_item_job_status", "job_id", "status"),
+    )
+
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("import_job.id"), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_input: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[ImportItemStatus] = mapped_column(
+        _enum(ImportItemStatus, "import_item_status", 16),
+        default=ImportItemStatus.pending,
+        nullable=False,
+    )
+    paper_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper.id"))
+    error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+
+    import_job: Mapped[ImportJob] = relationship(back_populates="items")
+
+
+class MergeRedirect(Base):
+    __tablename__ = "merge_redirect"
+
+    entity_type: Mapped[str] = mapped_column(String(16), primary_key=True)
+    old_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    new_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

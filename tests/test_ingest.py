@@ -1,0 +1,358 @@
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+import httpx
+import pytest
+
+from paperdb.config import get_settings
+from paperdb.db.session import get_sessionmaker
+from paperdb.ingest.resolve import resolve_input
+from paperdb.ingest.types import AuthorRecord, Candidate, VenueSuggestion
+
+SERVICE = {"Authorization": "Bearer pdb_svc_test0123456789abcdef0123456789abcdef"}
+
+
+def _doi() -> str:
+    return f"10.9999/{uuid.uuid4().hex}"
+
+
+def _crossref(doi: str, title: str) -> dict[str, Any]:
+    return {
+        "message": {
+            "DOI": doi,
+            "title": [title],
+            "abstract": "A useful abstract.",
+            "issued": {"date-parts": [[2026, 6, 1]]},
+            "type": "proceedings-article",
+            "container-title": ["AAAI Conference on Artificial Intelligence"],
+            "volume": "38",
+            "page": "1-10",
+            "author": [
+                {
+                    "given": "Shaoyuan",
+                    "family": "Yu",
+                    "ORCID": "https://orcid.org/0000-0002-1234-5678",
+                },
+                {"given": "Jane", "family": "Doe"},
+            ],
+            "URL": f"https://doi.org/{doi}",
+        }
+    }
+
+
+def _dblp(title: str) -> dict[str, Any]:
+    return {
+        "result": {
+            "hits": {
+                "hit": [
+                    {
+                        "info": {
+                            "title": title,
+                            "venue": "AAAI",
+                            "year": "2026",
+                            "key": "conf/aaai/Yu26",
+                            "url": "https://dblp.org/rec/conf/aaai/Yu26",
+                            "authors": {
+                                "author": [
+                                    {"text": "Shaoyuan Yu", "@pid": "Y/Shaoyuan_Yu"},
+                                    {"text": "Jane Doe", "@pid": "D/Jane_Doe"},
+                                ]
+                            },
+                        }
+                    }
+                ]
+            }
+        }
+    }
+
+
+def _mock_transport(doi: str, title: str) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "crossref.org" in url:
+            return httpx.Response(200, json=_crossref(doi, title))
+        if "dblp.org/search" in url:
+            return httpx.Response(200, json=_dblp(title))
+        if "openalex.org" in url:
+            return httpx.Response(200, json={"results": []})
+        if "semanticscholar.org" in url:
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_resolve_doi_with_venue_and_ccf() -> None:
+    doi = _doi()
+    transport = _mock_transport(doi, "Resolved Paper About Retrieval")
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="https://mock") as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session, f"https://doi.org/{doi}", get_settings(), client=client
+        )
+    assert candidate is not None, warnings
+    assert candidate.title == "Resolved Paper About Retrieval"
+    assert candidate.kind == "conference"
+    assert candidate.year == 2026
+    assert candidate.venue is not None
+    assert candidate.venue.venue_id is not None
+    assert candidate.evaluation["ccf"]["level"] == "A"
+    assert candidate.evaluation["cas"] is None
+    assert candidate.identifiers[0]["scheme"] == "doi"
+    assert any(author.dblp_pid for author in candidate.authors)
+    assert candidate.duplicate_of is None
+
+
+async def test_resolve_arxiv_preprint() -> None:
+    arxiv_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2601.01234v1</id>
+    <published>2026-01-05T00:00:00Z</published>
+    <title>An arXiv Test Paper</title>
+    <summary>Preprint abstract.</summary>
+    <author><name>Shaoyuan Yu</name></author>
+    <author><name>Jane Doe</name></author>
+    <arxiv:doi>10.9999/arxiv-linked</arxiv:doi>
+  </entry>
+</feed>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "export.arxiv.org" in url:
+            return httpx.Response(200, text=arxiv_xml)
+        if "dblp.org/search" in url:
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        if "semanticscholar.org" in url:
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session, "arXiv:2601.01234v1", get_settings(), client=client
+        )
+    assert candidate is not None, warnings
+    assert candidate.kind == "preprint"
+    assert candidate.title == "An arXiv Test Paper"
+    assert candidate.venue is None
+    assert candidate.identifiers[0]["scheme"] in {"doi", "arxiv"}
+
+
+async def test_resolve_duplicate(client: httpx.AsyncClient) -> None:
+    venue = (
+        await client.get("/v1/venues", params={"q": "AAAI", "limit": 1}, headers=SERVICE)
+    ).json()["items"][0]
+    doi = _doi()
+    created = await client.post(
+        "/v1/papers",
+        headers=SERVICE,
+        json={
+            "kind": "conference",
+            "title": "Already Stored Paper",
+            "year": 2026,
+            "venueId": venue["id"],
+            "identifiers": [{"scheme": "doi", "value": doi}],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    transport = _mock_transport(doi, "Already Stored Paper")
+    async with httpx.AsyncClient(transport=transport) as http, get_sessionmaker()() as session:
+        candidate, _ = await resolve_input(session, doi, get_settings(), client=http)
+    assert candidate is not None
+    assert candidate.duplicate_of is not None
+    assert candidate.duplicate_of["paperId"] == created.json()["id"]
+
+
+async def test_import_job_worker_creates_paper(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venue = (
+        await client.get("/v1/venues", params={"q": "AAAI", "limit": 1}, headers=SERVICE)
+    ).json()["items"][0]
+    doi = _doi()
+    title = f"Imported Paper {uuid.uuid4().hex[:8]}"
+
+    async def fake_resolve(session, raw, settings, *, client=None):
+        return (
+            Candidate(
+                confidence=0.9,
+                sources=["crossref"],
+                kind="conference",
+                title=title,
+                abstract="Imported abstract.",
+                year=2026,
+                publication_date=None,
+                authors=[
+                    AuthorRecord(
+                        name="Shaoyuan Yu",
+                        family="Yu",
+                        given="Shaoyuan",
+                        dblp_pid="Y/Shaoyuan_Yu",
+                    )
+                ],
+                identifiers=[{"scheme": "doi", "value": doi, "isPrimary": True}],
+                venue=VenueSuggestion(
+                    venue_id=venue["id"],
+                    full_name=venue["fullName"],
+                    abbrev=venue["abbrev"],
+                    kind="conference",
+                    year=2026,
+                    confidence=0.95,
+                    evidence="dblp",
+                ),
+                evaluation={"ccf": None, "cas": None},
+                _venue_name=venue["fullName"],
+                _dblp_venue_key="conf/aaai",
+            ),
+            [],
+        )
+
+    monkeypatch.setattr("paperdb.imports.service.resolve_input", fake_resolve)
+
+    response = await client.post(
+        "/v1/imports/identifiers",
+        headers=SERVICE,
+        json={"items": [doi]},
+    )
+    assert response.status_code == 202, response.text
+    import_id = response.json()["importId"]
+    job_id = response.json()["jobId"]
+
+    from paperdb.jobs.worker import run_once
+
+    assert await run_once() is True
+
+    import_job = await client.get(f"/v1/imports/{import_id}", headers=SERVICE)
+    assert import_job.status_code == 200
+    body = import_job.json()
+    assert body["status"] == "succeeded"
+    assert body["stats"]["created"] == 1
+    items = await client.get(f"/v1/imports/{import_id}/items", headers=SERVICE)
+    assert items.json()[0]["status"] == "created"
+    job = await client.get(f"/v1/jobs/{job_id}", headers=SERVICE)
+    assert job.json()["status"] == "succeeded"
+
+
+async def test_resolve_acl_bibtex() -> None:
+    bib = """@inproceedings{acl2024test,
+  title = {An ACL Test Paper},
+  author = {Alice Smith and Bob Jones},
+  booktitle = {Proceedings of ACL 2024},
+  year = {2024},
+  pages = {1--10},
+  url = {https://aclanthology.org/2024.acl-long.1/}
+}"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "aclanthology.org" in str(request.url):
+            return httpx.Response(200, text=bib)
+        if "dblp.org" in str(request.url):
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session,
+            "https://aclanthology.org/2024.acl-long.1/",
+            get_settings(),
+            client=client,
+        )
+    assert candidate is not None, warnings
+    assert candidate.title == "An ACL Test Paper"
+    assert candidate.kind == "conference"
+    assert candidate.year == 2024
+    assert any(item["scheme"] == "acl" for item in candidate.identifiers)
+
+
+async def test_resolve_openreview() -> None:
+    payload = {
+        "notes": [
+            {
+                "forum": "abc123",
+                "content": {
+                    "title": {"value": "An OpenReview Paper"},
+                    "authors": {"value": ["Alice Smith", "Bob Jones"]},
+                    "abstract": {"value": "OpenReview abstract."},
+                    "venue": {"value": "ICLR 2024"},
+                    "doi": {"value": "10.9999/openreview"},
+                },
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "api2.openreview.net" in str(request.url):
+            return httpx.Response(200, json=payload)
+        if "dblp.org" in str(request.url):
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session,
+            "https://openreview.net/forum?id=abc123",
+            get_settings(),
+            client=client,
+        )
+    assert candidate is not None, warnings
+    assert candidate.title == "An OpenReview Paper"
+    assert candidate.year == 2024
+    assert candidate.venue is not None
+    assert candidate.identifiers
+
+
+async def test_resolve_dblp_record() -> None:
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<dblp>
+  <record>
+    <info>
+      <title>A DBLP Test Paper.</title>
+      <authors>
+        <author pid="Y/Shaoyuan_Yu">Shaoyuan Yu</author>
+        <author pid="D/Jane_Doe">Jane Doe</author>
+      </authors>
+      <venue>AAAI</venue>
+      <year>2026</year>
+      <ee>https://doi.org/10.9999/dblp-test</ee>
+    </info>
+  </record>
+</dblp>
+"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "dblp.org/rec/" in str(request.url):
+            return httpx.Response(200, text=xml)
+        if "dblp.org/search" in str(request.url):
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session,
+            "https://dblp.org/rec/conf/aaai/Yu26.html",
+            get_settings(),
+            client=client,
+        )
+    assert candidate is not None, warnings
+    assert candidate.title == "A DBLP Test Paper"
+    assert candidate.kind == "conference"
+    assert candidate.venue is not None
+    assert candidate.venue.venue_id is not None
+    assert candidate.evaluation["ccf"]["level"] == "A"

@@ -4,6 +4,10 @@ set -eu
 # Run migrations before serving. Safe to re-run: Alembic is idempotent.
 alembic upgrade head
 
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 exec uvicorn paperdb.main:app \
   --host 0.0.0.0 \
   --port "${PAPERDB_PORT:-9720}" \
