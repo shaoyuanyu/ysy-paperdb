@@ -9,6 +9,7 @@ from sqlalchemy import (
     ARRAY,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Enum,
@@ -24,7 +25,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from paperdb.db.base import Base, Timestamped, UUIDPrimaryKey
@@ -105,6 +106,20 @@ class JobStatus(StrEnum):
     succeeded = "succeeded"
     failed = "failed"
     dead = "dead"
+
+
+class PdfTextStatus(StrEnum):
+    pending = "pending"
+    extracted = "extracted"
+    ocr_needed = "ocr_needed"
+    failed = "failed"
+
+
+class AnnotationKind(StrEnum):
+    highlight = "highlight"
+    underline = "underline"
+    note = "note"
+    region = "region"
 
 
 class ImportKind(StrEnum):
@@ -779,3 +794,103 @@ class ProjectPaper(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="papers")
+
+
+class PdfFile(UUIDPrimaryKey, Base):
+    __tablename__ = "pdf_file"
+    __table_args__ = (
+        Index("ix_pdf_file_paper", "paper_id"),
+        Index("ix_pdf_file_sha256", "sha256"),
+        Index("ix_pdf_file_storage_key", "storage_backend", "storage_key"),
+        Index(
+            "uq_pdf_file_primary",
+            "paper_id",
+            unique=True,
+            postgresql_where=text("is_primary AND deleted_at IS NULL"),
+        ),
+    )
+
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), nullable=False)
+    storage_backend: Mapped[str] = mapped_column(String(16), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    mime: Mapped[str] = mapped_column(String(64), default="application/pdf", nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(String(512))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    license_note: Mapped[str | None] = mapped_column(Text)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    text_status: Mapped[PdfTextStatus] = mapped_column(
+        _enum(PdfTextStatus, "pdf_text_status", 16),
+        default=PdfTextStatus.pending,
+        nullable=False,
+    )
+    text_language: Mapped[str | None] = mapped_column(String(16))
+    extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    paper: Mapped[Paper] = relationship("Paper", foreign_keys=[paper_id])
+    pages: Mapped[list[PdfPageText]] = relationship(
+        back_populates="file", cascade="all, delete-orphan"
+    )
+
+
+class PdfPageText(Base):
+    __tablename__ = "pdf_page_text"
+    __table_args__ = (
+        Index("ix_pdf_page_text_tsv", "tsv", postgresql_using="gin"),
+        Index(
+            "ix_pdf_page_text_trgm",
+            "text",
+            postgresql_using="gin",
+            postgresql_ops={"text": "gin_trgm_ops"},
+        ),
+    )
+
+    pdf_file_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("pdf_file.id"), primary_key=True)
+    page: Mapped[int] = mapped_column(Integer, primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', coalesce(text, ''))", persisted=True),
+        nullable=False,
+    )
+    char_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    file: Mapped[PdfFile] = relationship(back_populates="pages")
+
+
+class Annotation(UUIDPrimaryKey, Base):
+    __tablename__ = "annotation"
+    __table_args__ = (
+        Index("ix_annotation_paper_page", "paper_id", "page"),
+        Index("ix_annotation_file", "pdf_file_id"),
+    )
+
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), nullable=False)
+    pdf_file_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("pdf_file.id"), nullable=False)
+    kind: Mapped[AnnotationKind] = mapped_column(
+        _enum(AnnotationKind, "annotation_kind", 16), nullable=False
+    )
+    page: Mapped[int] = mapped_column(Integer, nullable=False)
+    rects: Mapped[list[dict[str, float]]] = mapped_column(JSONB, default=list, nullable=False)
+    quote: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    prefix: Mapped[str | None] = mapped_column(Text)
+    suffix: Mapped[str | None] = mapped_column(Text)
+    comment: Mapped[str | None] = mapped_column(Text)
+    color: Mapped[str] = mapped_column(String(16), default="yellow", nullable=False)
+    anchor_status: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

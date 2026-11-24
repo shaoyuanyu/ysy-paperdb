@@ -48,6 +48,17 @@ class LocalStorage(StorageBackend):
     async def exists(self, key: str) -> bool:
         return await asyncio.to_thread(self._path(key).is_file)
 
+    async def size(self, key: str) -> int:
+        return await asyncio.to_thread(lambda: self._path(key).stat().st_size)
+
+    async def read_range(self, key: str, start: int, end: int) -> bytes:
+        def read() -> bytes:
+            with self._path(key).open("rb") as handle:
+                handle.seek(start)
+                return handle.read(end - start + 1)
+
+        return await asyncio.to_thread(read)
+
     async def delete(self, key: str) -> None:
         try:
             await asyncio.to_thread(self._path(key).unlink)

@@ -783,3 +783,70 @@ class PaperBulkRequest(ApiModel):
 class PaperBulkResult(ApiModel):
     updated: int
     failed: list[dict[str, str]] = Field(default_factory=list)
+
+
+class PdfFileOut(ApiModel):
+    id: uuid.UUID
+    paper_id: uuid.UUID
+    is_primary: bool
+    byte_size: int
+    page_count: int | None = None
+    mime: str
+    original_filename: str | None = None
+    text_status: str
+    text_language: str | None = None
+    created_at: datetime
+
+
+class PdfUploadOut(ApiModel):
+    file: PdfFileOut
+    job_id: uuid.UUID | None = None
+
+
+class AnnotationCreate(ApiModel):
+    pdf_file_id: uuid.UUID
+    kind: str = "highlight"
+    page: int = Field(ge=1)
+    rects: list[dict[str, float]] = Field(min_length=1, max_length=64)
+    quote: str = ""
+    prefix: str | None = None
+    suffix: str | None = None
+    comment: str | None = None
+    color: str = "yellow"
+
+
+class AnnotationUpdate(ApiModel):
+    comment: str | None = None
+    color: str | None = None
+    rects: list[dict[str, float]] | None = None
+
+
+class AnnotationOut(ApiModel):
+    id: uuid.UUID
+    paper_id: uuid.UUID
+    pdf_file_id: uuid.UUID
+    kind: str
+    page: int
+    rects: list[dict[str, float]]
+    quote: str
+    prefix: str | None = None
+    suffix: str | None = None
+    comment: str | None = None
+    color: str
+    anchor_status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SearchHitOut(ApiModel):
+    paper_id: uuid.UUID
+    paper_title: str
+    file_id: uuid.UUID
+    page: int
+    snippet: str
+
+
+class FulltextSearchOut(ApiModel):
+    query: str
+    hits: list[SearchHitOut]
+    has_more: bool = False

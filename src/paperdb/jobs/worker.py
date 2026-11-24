@@ -11,7 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from paperdb.config import Settings, get_settings
 from paperdb.db.models import Job
 from paperdb.db.session import get_sessionmaker
-from paperdb.jobs.handlers import handle_bibtex, handle_enrich, handle_import
+from paperdb.jobs.handlers import (
+    handle_bibtex,
+    handle_enrich,
+    handle_extract_pdf,
+    handle_gc_blob,
+    handle_import,
+)
 from paperdb.jobs.queue import claim_job, complete, fail, reclaim_stale
 
 logger = logging.getLogger("paperdb.worker")
@@ -21,6 +27,8 @@ HANDLERS: dict[str, Handler] = {
     "import_identifiers": handle_import,
     "import_bibtex": handle_bibtex,
     "enrich_paper": handle_enrich,
+    "extract_pdf": handle_extract_pdf,
+    "gc_blob": handle_gc_blob,
 }
 
 

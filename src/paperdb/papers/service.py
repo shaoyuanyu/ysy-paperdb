@@ -517,7 +517,11 @@ def _state_out(paper: Paper) -> dict[str, Any]:
     }
 
 
-def paper_to_summary(paper: Paper, ranks: dict[uuid.UUID, list[VenueRank]]) -> dict[str, Any]:
+def paper_to_summary(
+    paper: Paper,
+    ranks: dict[uuid.UUID, list[VenueRank]],
+    media: dict[str, int] | None = None,
+) -> dict[str, Any]:
     venue_ranks = ranks.get(paper.venue_id, []) if paper.venue_id else []
     authors = [
         {
@@ -545,7 +549,11 @@ def paper_to_summary(paper: Paper, ranks: dict[uuid.UUID, list[VenueRank]]) -> d
         "authors": authors,
         "author_count": len(authors),
         "state": _state_out(paper),
-        "counts": {"pdf_files": 0, "annotations": 0, "cited_by": 0},
+        "counts": {
+            "pdf_files": (media or {}).get("pdf_files", 0),
+            "annotations": (media or {}).get("annotations", 0),
+            "cited_by": 0,
+        },
         "tags": sorted(tag.path for tag in paper.tags),
         "collections": [collection.id for collection in paper.collections],
         "created_at": paper.created_at,
@@ -554,8 +562,12 @@ def paper_to_summary(paper: Paper, ranks: dict[uuid.UUID, list[VenueRank]]) -> d
     }
 
 
-def paper_to_detail(paper: Paper, ranks: dict[uuid.UUID, list[VenueRank]]) -> dict[str, Any]:
-    data = paper_to_summary(paper, ranks)
+def paper_to_detail(
+    paper: Paper,
+    ranks: dict[uuid.UUID, list[VenueRank]],
+    media: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    data = paper_to_summary(paper, ranks, media)
     data.update(
         {
             "abstract": paper.abstract,

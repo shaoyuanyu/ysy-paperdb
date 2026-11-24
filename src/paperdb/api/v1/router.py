@@ -1,13 +1,16 @@
 from fastapi import APIRouter
 
 from paperdb.api.v1 import (
+    annotations,
     authors,
     collections,
     exports,
+    files,
     imports,
     papers,
     projects,
     rules,
+    search,
     system,
     tags,
     tokens,
@@ -28,5 +31,8 @@ api_router.include_router(tags.router)
 api_router.include_router(views.router)
 api_router.include_router(projects.router)
 api_router.include_router(rules.router)
+api_router.include_router(files.router)
+api_router.include_router(annotations.router)
+api_router.include_router(search.router)
 
 __all__ = ["api_router"]

@@ -55,6 +55,7 @@ from paperdb.papers.service import (
     restore_paper,
     update_paper,
 )
+from paperdb.pdf.service import media_counts
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -62,7 +63,8 @@ router = APIRouter(prefix="/papers", tags=["papers"])
 async def _detail(session: AsyncSession, ref: str) -> PaperDetail:
     paper = await get_paper(session, ref)
     ranks = await ranks_for_venues(session, [paper.venue_id] if paper.venue_id else [])
-    return PaperDetail.model_validate(paper_to_detail(paper, ranks))
+    counts = await media_counts(session, [paper.id])
+    return PaperDetail.model_validate(paper_to_detail(paper, ranks, counts.get(paper.id)))
 
 
 @router.get("", response_model=PaperPage)

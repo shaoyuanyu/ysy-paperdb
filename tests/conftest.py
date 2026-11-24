@@ -16,6 +16,7 @@ os.environ["PAPERDB_STORAGE_ROOT"] = str(Path(".test-storage").resolve())
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import paperdb.db.models  # noqa: F401
@@ -34,6 +35,7 @@ DATASETS = [
 async def seeded_database() -> AsyncIterator[None]:
     engine = create_async_engine(os.environ["PAPERDB_DATABASE_URL"])
     async with engine.begin() as connection:
+        await connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
 
@@ -52,6 +54,7 @@ async def seeded_database() -> AsyncIterator[None]:
             await session.commit()
     yield
     async with engine.begin() as connection:
+        await connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await connection.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 

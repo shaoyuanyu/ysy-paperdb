@@ -1,5 +1,6 @@
 from paperdb.db.base import Base
 from paperdb.db.models import (
+    Annotation,
     ApiToken,
     Author,
     AuthorAlias,
@@ -17,6 +18,8 @@ from paperdb.db.models import (
     PaperIdentifier,
     PaperState,
     PaperTag,
+    PdfFile,
+    PdfPageText,
     Project,
     ProjectCollection,
     ProjectPaper,
@@ -30,6 +33,7 @@ from paperdb.db.models import (
 )
 
 __all__ = [
+    "Annotation",
     "ApiToken",
     "Author",
     "AuthorAlias",
@@ -48,6 +52,8 @@ __all__ = [
     "PaperIdentifier",
     "PaperState",
     "PaperTag",
+    "PdfFile",
+    "PdfPageText",
     "Project",
     "ProjectCollection",
     "ProjectPaper",

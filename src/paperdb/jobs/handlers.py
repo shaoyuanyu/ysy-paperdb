@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.config import Settings
-from paperdb.db.models import IdentifierScheme, Job, PaperIdentifier
+from paperdb.db.models import IdentifierScheme, Job, PaperIdentifier, PdfFile
 from paperdb.imports.service import process_bibtex, process_import
 from paperdb.ingest.resolve import resolve_input
 from paperdb.ingest.venue_resolve import ensure_venue
 from paperdb.papers.service import get_paper
+from paperdb.pdf.service import extract_file
+from paperdb.storage import get_storage
 
 
 async def handle_import(session: AsyncSession, job: Job, settings: Settings) -> None:
@@ -111,3 +113,34 @@ async def handle_enrich(session: AsyncSession, job: Job, settings: Settings) -> 
         existing.add((scheme, value))
     paper.version += 1
     await session.flush()
+
+
+async def handle_extract_pdf(session: AsyncSession, job: Job, settings: Settings) -> None:
+    file_id = job.payload.get("file_id")
+    if not file_id:
+        raise ValueError("extract job missing file_id")
+    await extract_file(session, uuid.UUID(str(file_id)))
+    await session.flush()
+
+
+async def handle_gc_blob(session: AsyncSession, job: Job, settings: Settings) -> None:
+    backend = str(job.payload.get("backend") or "")
+    key = str(job.payload.get("key") or "")
+    if not key:
+        raise ValueError("gc job missing key")
+    if backend != get_storage().name:
+        return
+    count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(PdfFile)
+            .where(
+                PdfFile.storage_backend == backend,
+                PdfFile.storage_key == key,
+                PdfFile.deleted_at.is_(None),
+            )
+        )
+        or 0
+    )
+    if count == 0:
+        await get_storage().delete(key)
