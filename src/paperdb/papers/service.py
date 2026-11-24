@@ -618,8 +618,11 @@ async def list_papers(
     year: int | None,
     kind: str | None,
     venue_id: uuid.UUID | None,
+    collection_id: uuid.UUID | None,
+    tag_path: str | None,
     status: str | None,
     starred: bool | None,
+    unfiled: bool | None,
     filter_payload: dict[str, Any] | None,
     limit: int,
     cursor: str | None,
@@ -642,6 +645,20 @@ async def list_papers(
         stmt = stmt.where(Paper.kind == _parse_kind(kind))
     if venue_id is not None:
         stmt = stmt.where(Paper.venue_id == venue_id)
+    if collection_id is not None:
+        from paperdb.db.models import Collection
+        from paperdb.organize.collections import descendant_ids
+
+        ids = [collection_id, *await descendant_ids(session, collection_id)]
+        stmt = stmt.where(Paper.collections.any(Collection.id.in_(ids)))
+    if tag_path is not None:
+        from paperdb.db.models import Tag
+
+        stmt = stmt.where(Paper.tags.any(Tag.path == tag_path))
+    if unfiled is True:
+        stmt = stmt.where(~Paper.collections.any())
+    elif unfiled is False:
+        stmt = stmt.where(Paper.collections.any())
     if status is not None:
         stmt = stmt.where(Paper.state.has(PaperState.status == _parse_reading_status(status)))
     if starred is True:
