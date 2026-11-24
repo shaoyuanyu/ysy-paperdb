@@ -1,0 +1,69 @@
+# paperdb M1 local/production compose.
+# The API image is built by CI (ACR) or locally with `podman compose build`.
+#
+# For production, set PAPERDB_NETWORK to the homepage's compose network
+# (e.g. ysy-homepage-web_web) so Next.js can reach http://paperdb-api:9720.
+
+x-paperdb-env: &paperdb-env
+  PAPERDB_ENV: ${PAPERDB_ENV:-prod}
+  PAPERDB_SERVICE_TOKEN: ${PAPERDB_SERVICE_TOKEN:?set PAPERDB_SERVICE_TOKEN}
+  PAPERDB_TOKEN_PEPPER: ${PAPERDB_TOKEN_PEPPER:?set PAPERDB_TOKEN_PEPPER}
+  PAPERDB_STORAGE_BACKEND: local
+  PAPERDB_STORAGE_ROOT: /data/files
+  PAPERDB_MAX_UPLOAD_MB: ${PAPERDB_MAX_UPLOAD_MB:-200}
+  OPENALEX_MAILTO: ${OPENALEX_MAILTO:-me}
+  CROSSREF_MAILTO: ${CROSSREF_MAILTO:-me}
+  ARXIV_USER_AGENT: ${ARXIV_USER_AGENT:-paperdb/0.1 (mailto:me)}
+  S2_API_KEY: ${S2_API_KEY:-}
+
+services:
+  paperdb-db:
+    image: docker.io/library/postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paperdb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paperdb_dev_password}
+      POSTGRES_DB: paperdb
+    volumes:
+      - paperdb-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperdb -d paperdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  paperdb-api:
+    build: .
+    image: ${PAPERDB_IMAGE:-paperdb:dev}
+    restart: unless-stopped
+    depends_on:
+      paperdb-db:
+        condition: service_healthy
+    environment:
+      <<: *paperdb-env
+      PAPERDB_DATABASE_URL: postgresql+asyncpg://paperdb:${POSTGRES_PASSWORD:-paperdb_dev_password}@paperdb-db:5432/paperdb
+    ports:
+      - "127.0.0.1:9720:9720"
+    volumes:
+      - paperdb-files:/data
+      - ./datasets:/app/datasets:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9720/readyz', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  paperdb-db:
+  paperdb-files:
+
+networks:
+  default:
+    name: ${PAPERDB_NETWORK:-paperdb-net}
