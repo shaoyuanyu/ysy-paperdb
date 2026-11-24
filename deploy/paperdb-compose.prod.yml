@@ -37,7 +37,7 @@ services:
 
   paperdb-api:
     build:
-      context: .
+      context: ..
     image: paperdb:prod
     restart: unless-stopped
     depends_on:
@@ -50,7 +50,7 @@ services:
       - "127.0.0.1:9720:9720"
     volumes:
       - paperdb-files:/data
-      - ./datasets:/app/datasets:ro
+      - ../datasets:/app/datasets:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9720), 3).close()"]
       interval: 30s
@@ -74,7 +74,7 @@ services:
       PAPERDB_DATABASE_URL: postgresql+asyncpg://paperdb:${POSTGRES_PASSWORD}@paperdb-db:5432/paperdb
     volumes:
       - paperdb-files:/data
-      - ./datasets:/app/datasets:ro
+      - ../datasets:/app/datasets:ro
 
 volumes:
   paperdb-db:
