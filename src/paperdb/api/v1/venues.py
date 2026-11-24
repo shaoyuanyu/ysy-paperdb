@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.api.deps import scoped
-from paperdb.api.schemas import VenueDetail, VenuePage, VenueRankOut
+from paperdb.api.schemas import VenueCreate, VenueDetail, VenuePage, VenueRankOut, VenueUpdate
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.db.session import get_session
-from paperdb.venues.service import get_venue, list_venues, venue_detail, venue_summary
+from paperdb.venues.service import (
+    create_venue,
+    get_venue,
+    list_venues,
+    update_venue,
+    venue_detail,
+    venue_summary,
+)
 
 router = APIRouter(prefix="/venues", tags=["venues"])
 
@@ -52,3 +59,29 @@ async def ranks_endpoint(
     venue = await get_venue(session, venue_id)
     detail = await venue_detail(session, venue)
     return detail.ranks
+
+
+@router.post("", response_model=VenueDetail, status_code=status.HTTP_201_CREATED)
+async def create_endpoint(
+    payload: VenueCreate,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+) -> VenueDetail:
+    venue = await create_venue(session, payload)
+    await session.commit()
+    venue = await get_venue(session, venue.id)
+    return await venue_detail(session, venue)
+
+
+@router.patch("/{venue_id}", response_model=VenueDetail)
+async def update_endpoint(
+    venue_id: uuid.UUID,
+    payload: VenueUpdate,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+) -> VenueDetail:
+    venue = await get_venue(session, venue_id)
+    await update_venue(session, venue, payload)
+    await session.commit()
+    venue = await get_venue(session, venue.id)
+    return await venue_detail(session, venue)

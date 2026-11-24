@@ -11,27 +11,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from paperdb.api.schemas import (
+    AuthorCreate,
     AuthorDetail,
+    AuthorUpdate,
     VenueAliasOut,
+    VenueCreate,
     VenueDetail,
     VenueEditionOut,
     VenueIdentifierOut,
     VenueRankOut,
     VenueSummary,
+    VenueUpdate,
 )
 from paperdb.config import Settings
 from paperdb.db.models import (
     Author,
     AuthorAlias,
+    AuthorStatus,
     DatasetVersion,
     Paper,
     PaperAuthor,
     Venue,
+    VenueAlias,
+    VenueIdentifier,
     VenueKind,
     VenueStatus,
 )
 from paperdb.errors import ApiError
 from paperdb.storage import get_storage
+from paperdb.venues.normalize import normalize_issn, normalize_name
 
 
 def _encode_cursor(key: str, item_id: uuid.UUID) -> str:
@@ -344,3 +352,187 @@ async def storage_meta(settings: Settings) -> dict[str, Any]:
         "files": files,
         "blobs": files,
     }
+
+
+async def create_venue(session: AsyncSession, data: VenueCreate) -> Venue:
+    try:
+        kind = VenueKind(data.kind)
+    except ValueError as exc:
+        raise ApiError(422, "invalid_kind", f"Unsupported venue kind: {data.kind}") from exc
+    full_name = data.full_name.strip()
+    if not full_name:
+        raise ApiError(422, "invalid_venue", "fullName is required")
+    normalized = normalize_name(full_name)
+    existing = await session.scalar(
+        select(Venue).where(
+            Venue.kind == kind,
+            Venue.normalized_name == normalized,
+            Venue.merged_into_id.is_(None),
+        )
+    )
+    if existing is not None:
+        raise ApiError(409, "conflict", f"Venue already exists: {existing.id}")
+    if data.parent_id is not None:
+        parent = await session.get(Venue, data.parent_id)
+        if parent is None:
+            raise ApiError(422, "parent_not_found", "Parent venue not found")
+        if parent.kind != kind:
+            raise ApiError(422, "parent_kind_mismatch", "Parent venue kind differs")
+
+    issn_print = normalize_issn(data.issn_print) if data.issn_print else None
+    issn_online = normalize_issn(data.issn_online) if data.issn_online else None
+    venue = Venue(
+        id=uuid.uuid4(),
+        kind=kind,
+        full_name=full_name,
+        normalized_name=normalized,
+        abbrev=(data.abbrev or "").strip() or None,
+        parent_id=data.parent_id,
+        dblp_key=(data.dblp_key or "").strip() or None,
+        issn_print=issn_print,
+        issn_online=issn_online,
+        homepage_url=data.homepage_url,
+        ccf_field=data.ccf_field,
+        ccf_field_key=data.ccf_field_key,
+        status=(
+            VenueStatus.confirmed
+            if data.dblp_key or issn_print or issn_online
+            else VenueStatus.provisional
+        ),
+    )
+    session.add(venue)
+    await session.flush()
+    session.add(
+        VenueAlias(
+            venue_id=venue.id,
+            alias=full_name,
+            normalized_alias=normalized,
+            source="manual",
+        )
+    )
+    if venue.abbrev:
+        abbrev_norm = normalize_name(venue.abbrev)
+        if abbrev_norm and abbrev_norm != normalized:
+            session.add(
+                VenueAlias(
+                    venue_id=venue.id,
+                    alias=venue.abbrev,
+                    normalized_alias=abbrev_norm,
+                    source="manual",
+                )
+            )
+    for source, value in (("dblp", venue.dblp_key), ("issn", issn_print), ("issn", issn_online)):
+        if value:
+            session.add(
+                VenueIdentifier(
+                    venue_id=venue.id,
+                    source=source,
+                    value=value,
+                    normalized=value,
+                    is_primary=value == venue.dblp_key or value == issn_print,
+                )
+            )
+    await session.flush()
+    return venue
+
+
+async def update_venue(session: AsyncSession, venue: Venue, data: VenueUpdate) -> Venue:
+    fields = data.model_fields_set
+    if "full_name" in fields and data.full_name is not None:
+        full_name = data.full_name.strip()
+        if not full_name:
+            raise ApiError(422, "invalid_venue", "fullName cannot be empty")
+        normalized = normalize_name(full_name)
+        conflict = await session.scalar(
+            select(Venue.id).where(
+                Venue.kind == venue.kind,
+                Venue.normalized_name == normalized,
+                Venue.id != venue.id,
+                Venue.merged_into_id.is_(None),
+            )
+        )
+        if conflict:
+            raise ApiError(409, "conflict", "Venue name already exists")
+        venue.full_name = full_name
+        venue.normalized_name = normalized
+    if "abbrev" in fields:
+        venue.abbrev = (data.abbrev or "").strip() or None
+    if "parent_id" in fields:
+        if data.parent_id is not None:
+            parent = await session.get(Venue, data.parent_id)
+            if parent is None:
+                raise ApiError(422, "parent_not_found", "Parent venue not found")
+            if parent.kind != venue.kind or parent.id == venue.id:
+                raise ApiError(422, "invalid_parent", "Invalid parent venue")
+        venue.parent_id = data.parent_id
+    if "dblp_key" in fields:
+        venue.dblp_key = (data.dblp_key or "").strip() or None
+    if "issn_print" in fields:
+        venue.issn_print = normalize_issn(data.issn_print) if data.issn_print else None
+    if "issn_online" in fields:
+        venue.issn_online = normalize_issn(data.issn_online) if data.issn_online else None
+    if "homepage_url" in fields:
+        venue.homepage_url = data.homepage_url
+    if "ccf_field" in fields:
+        venue.ccf_field = data.ccf_field
+    if "ccf_field_key" in fields:
+        venue.ccf_field_key = data.ccf_field_key
+    await session.flush()
+    return venue
+
+
+async def create_author(session: AsyncSession, data: AuthorCreate) -> Author:
+    display_name = data.display_name.strip()
+    if not display_name:
+        raise ApiError(422, "invalid_author", "displayName is required")
+    if data.is_me:
+        existing_me = await session.scalar(
+            select(Author.id).where(Author.is_me.is_(True), Author.merged_into_id.is_(None))
+        )
+        if existing_me:
+            raise ApiError(409, "conflict", "An is_me author already exists")
+    author = Author(
+        id=uuid.uuid4(),
+        display_name=display_name,
+        family_name=data.family_name,
+        given_name=data.given_name,
+        orcid=data.orcid,
+        dblp_pid=data.dblp_pid,
+        s2_author_id=data.s2_author_id,
+        openalex_id=data.openalex_id,
+        homepage_url=data.homepage_url,
+        is_me=data.is_me,
+        status=AuthorStatus.confirmed,
+    )
+    session.add(author)
+    await session.flush()
+    return author
+
+
+async def update_author(session: AsyncSession, author: Author, data: AuthorUpdate) -> Author:
+    fields = data.model_fields_set
+    if "display_name" in fields and data.display_name is not None:
+        display_name = data.display_name.strip()
+        if not display_name:
+            raise ApiError(422, "invalid_author", "displayName cannot be empty")
+        author.display_name = display_name
+    for field in ("family_name", "given_name", "homepage_url"):
+        if field in fields:
+            setattr(author, field, getattr(data, field))
+    for field in ("orcid", "dblp_pid", "s2_author_id", "openalex_id"):
+        if field in fields:
+            setattr(author, field, getattr(data, field) or None)
+    if "is_me" in fields and data.is_me is not None:
+        if data.is_me and not author.is_me:
+            existing_me = await session.scalar(
+                select(Author.id).where(
+                    Author.is_me.is_(True),
+                    Author.id != author.id,
+                    Author.merged_into_id.is_(None),
+                )
+            )
+            if existing_me:
+                raise ApiError(409, "conflict", "An is_me author already exists")
+        author.is_me = data.is_me
+    await session.flush()
+    return author

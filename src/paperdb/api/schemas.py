@@ -401,3 +401,52 @@ class ExportTokenOut(ApiModel):
     last_accessed_at: datetime | None = None
     access_count: int = 0
     revoked_at: datetime | None = None
+
+
+class VenueCreate(ApiModel):
+    kind: str
+    full_name: str
+    abbrev: str | None = None
+    parent_id: uuid.UUID | None = None
+    dblp_key: str | None = None
+    issn_print: str | None = None
+    issn_online: str | None = None
+    homepage_url: str | None = None
+    ccf_field: str | None = None
+    ccf_field_key: str | None = None
+
+
+class VenueUpdate(ApiModel):
+    full_name: str | None = None
+    abbrev: str | None = None
+    parent_id: uuid.UUID | None = None
+    dblp_key: str | None = None
+    issn_print: str | None = None
+    issn_online: str | None = None
+    homepage_url: str | None = None
+    ccf_field: str | None = None
+    ccf_field_key: str | None = None
+
+
+class AuthorCreate(ApiModel):
+    display_name: str
+    family_name: str | None = None
+    given_name: str | None = None
+    orcid: str | None = None
+    dblp_pid: str | None = None
+    s2_author_id: str | None = None
+    openalex_id: str | None = None
+    homepage_url: str | None = None
+    is_me: bool = False
+
+
+class AuthorUpdate(ApiModel):
+    display_name: str | None = None
+    family_name: str | None = None
+    given_name: str | None = None
+    orcid: str | None = None
+    dblp_pid: str | None = None
+    s2_author_id: str | None = None
+    openalex_id: str | None = None
+    homepage_url: str | None = None
+    is_me: bool | None = None

@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.api.deps import scoped
-from paperdb.api.schemas import AuthorDetail, AuthorPage
+from paperdb.api.schemas import AuthorCreate, AuthorDetail, AuthorPage, AuthorUpdate
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.db.session import get_session
 from paperdb.venues.service import (
     author_detail,
+    create_author,
     get_author,
     list_authors,
+    update_author,
 )
 
 router = APIRouter(prefix="/authors", tags=["authors"])
@@ -44,4 +46,28 @@ async def get_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> AuthorDetail:
     author = await get_author(session, author_id)
+    return await author_detail(session, author)
+
+
+@router.post("", response_model=AuthorDetail, status_code=status.HTTP_201_CREATED)
+async def create_endpoint(
+    payload: AuthorCreate,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+) -> AuthorDetail:
+    author = await create_author(session, payload)
+    await session.commit()
+    return await author_detail(session, author)
+
+
+@router.patch("/{author_id}", response_model=AuthorDetail)
+async def update_endpoint(
+    author_id: uuid.UUID,
+    payload: AuthorUpdate,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+) -> AuthorDetail:
+    author = await get_author(session, author_id)
+    await update_author(session, author, payload)
+    await session.commit()
     return await author_detail(session, author)

@@ -93,11 +93,11 @@ Done and verified locally against PostgreSQL 17:
 - CCF 2026 import: 677 venues / 681 rank rows (DBLP-key collisions handled;
   multi-field ranks kept as non-primary)
 - CAS 2025 import: 547 new venues + 211 exact-name matches / 2060 rank rows
-- venue/author/paper CRUD, citekey generation, CCF/CAS evaluation resolution
+- paper CRUD; venue/author create/read/update; citekey generation; CCF/CAS evaluation resolution
   (including `valid_from` fallback), cursor pagination
 - OpenAPI at `/openapi.json`; local content-addressed `StorageBackend`
 - Alembic migration, Dockerfile, compose, entrypoint migration, Podman image build verified
-- 27 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
+- 29 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
 
 M1 intentionally does **not** include resolve/enrich (Crossref/arXiv/DBLP/...),
 BibTeX import/export, PDF files/annotations, collections/tags/views, or the

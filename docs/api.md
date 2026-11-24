@@ -82,6 +82,7 @@ If-Match: "3"            # 可选，乐观锁
 | `PAPERDB_STORAGE_ROOT` | local 必填 | 如 `/data/files` |
 | `PAPERDB_MAX_UPLOAD_MB` | | 默认 200 |
 | `PAPERDB_CORS_ORIGINS` | | 逗号分隔；默认空 = 关闭 CORS |
+| `PAPERDB_PUBLIC_URL` | | 生成 `.bib` 私密 URL 的基地址，如 `https://library.shaoyuanyu.cn` |
 | `PAPERDB_ENV` | | `dev` / `prod` |
 | `CROSSREF_MAILTO` | 建议 | Crossref polite pool |
 | `OPENALEX_MAILTO` | 建议 | OpenAlex polite pool |
@@ -439,6 +440,7 @@ If-Match: "3"            # 可选，乐观锁
 | 方法 | 路径 | Scope | 说明 |
 |---|---|---|---|
 | GET | `/v1/authors` | R | `q`、`isMe`、分页 |
+| POST | `/v1/authors` | W | 手动创建作者（M1；`isMe` 唯一） |
 | GET | `/v1/authors/{id}` | R | 详情 + 统计 |
 | PATCH | `/v1/authors/{id}` | W | 改名/加 ID/设 `isMe` |
 | POST | `/v1/authors/{id}/merge` | W | 合并 |
