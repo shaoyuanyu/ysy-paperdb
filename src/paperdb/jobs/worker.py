@@ -17,6 +17,7 @@ from paperdb.jobs.handlers import (
     handle_extract_pdf,
     handle_gc_blob,
     handle_import,
+    handle_sync_citations,
 )
 from paperdb.jobs.queue import claim_job, complete, fail, reclaim_stale
 
@@ -29,6 +30,7 @@ HANDLERS: dict[str, Handler] = {
     "enrich_paper": handle_enrich,
     "extract_pdf": handle_extract_pdf,
     "gc_blob": handle_gc_blob,
+    "sync_citations": handle_sync_citations,
 }
 
 

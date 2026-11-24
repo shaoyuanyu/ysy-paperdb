@@ -748,3 +748,29 @@ const pdf = await getDocument({
 8. **图谱**（若时间允许）：d3-force + 邻接，否则隐藏入口。
 
 每步都保持"可上线"：列表与导入先跑通，PDF 阅读器不应阻塞日常录入。
+
+
+---
+
+## 15. M5 实现状态（2026-11-25）
+
+已完成并验证（`pnpm build` / `tsc` / `eslint`，Playwright 截图）：
+
+- `/library` 列表：搜索、状态/类型筛选、集合/标签/视图/项目入口、批量改状态/打标签、文件/批注计数、分页。
+- `/library/papers/[ref]` 详情：卷期页/摘要/作者/CCF/CAS/标识符/标签/集合、状态/评分/星标、上传 PDF、BibTeX 下载、批注列表。
+- `/library/import`：标识符批量导入、BibTeX 上传、任务轮询与逐条结果；最近导入。
+- `/library/settings`：服务状态、个人 token 创建/撤销、库级导出链接、数据集/存储。
+- `/library/collections`：建集合、树、删除（promote）。
+- `/library/papers/[ref]/read`：pdf.js 双页（默认）/单页、页码跳转、深色反色（默认开）、批注叠层、PDF 内全文搜索。
+- 代理 `app/api/library/[...path]/route.ts`：owner-only、路径白名单、同源写请求校验、Range/HEAD、服务 token 仅服务端。
+- 导航：主人专属「文献库」入口；`messages` 增加 `library` 命名空间。
+- 依赖：`@tanstack/react-query`（为后续视图状态预留）、`@tanstack/react-virtual`（列表虚拟化预留）、`pdfjs-dist`；`public/pdf.worker.min.mjs` 由 pdfjs-dist 复制。
+
+### 已知差距
+
+- 列表暂未接虚拟滚动（`PaperTable` 一次渲染一页 ≤50 条），搜索/分页已可用。
+- 批注创建 UI 尚未接文本选择（后端 API 已就绪，详情/阅读器能展示与跳转）；下一步 M5b 补 selection → rects。
+- 视图/项目创建 UI 未做（API 已就绪），当前只读入口。
+- 代理上传当前 `arrayBuffer` 缓冲；200MB 慢网需改为 streaming（Nginx `proxy_request_buffering off` 已写）。
+- `/library` metadata `noindex` 尚未加，部署前补。
+- 命令面板/移动端底部批量条未做。

@@ -4,7 +4,7 @@ CS-native literature library backend. M1 scaffold: FastAPI + async SQLAlchemy +
 PostgreSQL, bearer-token auth, local content-addressed storage, CCF/CAS dataset
 import, and minimal papers/venues/authors CRUD.
 
-See [docs/README.md](docs/README.md) for the full design; implementation notes: [M1](docs/M1.md), [M2](docs/M2.md), [M3](docs/M3.md), [M4](docs/M4.md).
+See [docs/README.md](docs/README.md) for the full design; implementation notes: [M1](docs/M1.md), [M2](docs/M2.md), [M3](docs/M3.md), [M4](docs/M4.md), [M6](docs/M6.md), [deploy](docs/deploy.md).
 
 ## Quickstart (local, Podman Postgres)
 
@@ -99,13 +99,13 @@ Done and verified locally against PostgreSQL 17:
 - Postgres job queue + worker; identifier/BibTeX imports; dedupe/merge; BibTeX export
 - OpenAPI at `/openapi.json`; local content-addressed `StorageBackend`
 - Alembic migration, Dockerfile, compose, entrypoint migration, Podman image build verified
-- 47 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
+- 48 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
 
-M4 adds private PDF storage, text extraction, full-text search, Range streaming,
-and annotations. It intentionally does **not** include the frontend reader
-(M5b) or citation sync (M6).
+M5 adds the owner-only Next.js library (list/detail/import/settings), the
+double-page/inverted PDF reader, and citation sections; M6 adds OpenAlex
+citation edges/stubs. M7 adds the deploy/backup/runbook.
 
-Next: M5a frontend list/detail/import pages, then M5b PDF reader.
+Next: production smoke + periodic citation sync; optional graph canvas.
 
 ## Development
 

@@ -18,18 +18,23 @@ from paperdb.api.schemas import (
 )
 from paperdb.config import Settings
 from paperdb.db.models import (
+    Collection,
+    CollectionPaper,
     ImportItem,
     ImportItemStatus,
     ImportJob,
     ImportKind,
     JobStatus,
     Paper,
+    PaperTag,
 )
 from paperdb.errors import ApiError
 from paperdb.ingest.resolve import evaluate_venue, find_duplicate, resolve_input, suggest_venue
 from paperdb.ingest.types import Candidate
 from paperdb.ingest.venue_resolve import ensure_venue
 from paperdb.jobs.queue import enqueue
+from paperdb.organize.rules import apply_rules_on
+from paperdb.organize.tags import ensure_tag_path
 from paperdb.papers.bibtex_import import (
     entry_as_json,
     entry_from_json,
@@ -64,6 +69,11 @@ async def create_import_job(
             "options": {
                 "onDuplicate": payload.options.on_duplicate,
                 "defaultTags": payload.options.default_tags,
+                "defaultCollectionId": (
+                    str(payload.options.default_collection_id)
+                    if payload.options.default_collection_id
+                    else None
+                ),
             }
         },
         stats={},
@@ -207,6 +217,20 @@ async def process_import(
                         edition.id if edition else None,
                     ),
                 )
+                options = (import_job.input or {}).get("options") or {}
+                for path in options.get("defaultTags") or []:
+                    tag = await ensure_tag_path(session, str(path))
+                    if await session.get(PaperTag, (paper.id, tag.id)) is None:
+                        session.add(PaperTag(paper_id=paper.id, tag_id=tag.id))
+                if options.get("defaultCollectionId"):
+                    collection = await session.get(
+                        Collection, uuid.UUID(str(options["defaultCollectionId"]))
+                    )
+                    if collection is not None and (
+                        await session.get(CollectionPaper, (collection.id, paper.id)) is None
+                    ):
+                        session.add(CollectionPaper(collection_id=collection.id, paper_id=paper.id))
+                await apply_rules_on(session, paper, "import")
                 item.status = ImportItemStatus.created
                 item.paper_id = paper.id
         except ApiError as exc:
@@ -404,6 +428,20 @@ async def process_bibtex(
                             edition.id if edition else None,
                         ),
                     )
+                options = (import_job.input or {}).get("options") or {}
+                for path in options.get("defaultTags") or []:
+                    tag = await ensure_tag_path(session, str(path))
+                    if await session.get(PaperTag, (paper.id, tag.id)) is None:
+                        session.add(PaperTag(paper_id=paper.id, tag_id=tag.id))
+                if options.get("defaultCollectionId"):
+                    collection = await session.get(
+                        Collection, uuid.UUID(str(options["defaultCollectionId"]))
+                    )
+                    if collection is not None and (
+                        await session.get(CollectionPaper, (collection.id, paper.id)) is None
+                    ):
+                        session.add(CollectionPaper(collection_id=collection.id, paper_id=paper.id))
+                await apply_rules_on(session, paper, "import")
                 item.status = ImportItemStatus.created
                 item.paper_id = paper.id
         except ApiError as exc:

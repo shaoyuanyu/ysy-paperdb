@@ -92,11 +92,7 @@ async def delete_rule(session: AsyncSession, rule: AutoRule) -> None:
     await session.delete(rule)
 
 
-async def apply_rule(session: AsyncSession, rule: AutoRule) -> int:
-    condition = compile_filter(rule.filter)
-    paper_ids = (
-        await session.scalars(select(Paper.id).where(Paper.deleted_at.is_(None), condition))
-    ).all()
+async def _apply_actions(session: AsyncSession, rule: AutoRule, paper_ids: list[uuid.UUID]) -> int:
     applied = 0
     for paper_id in paper_ids:
         for action in rule.actions:
@@ -125,6 +121,40 @@ async def apply_rule(session: AsyncSession, rule: AutoRule) -> int:
                 else:
                     state.status = ReadingStatus(str(action["value"]))
         applied += 1
+    return applied
+
+
+async def apply_rule(session: AsyncSession, rule: AutoRule) -> int:
+    condition = compile_filter(rule.filter)
+    paper_ids = list(
+        (await session.scalars(select(Paper.id).where(Paper.deleted_at.is_(None), condition))).all()
+    )
+    applied = await _apply_actions(session, rule, paper_ids)
     rule.last_run_at = datetime.now(UTC)
+    await session.flush()
+    return applied
+
+
+async def apply_rules_on(session: AsyncSession, paper: Paper, trigger: str) -> int:
+    rules = [
+        rule
+        for rule in (
+            await session.scalars(select(AutoRule).where(AutoRule.enabled.is_(True)))
+        ).all()
+        if trigger in (rule.run_on or [])
+    ]
+    applied = 0
+    for rule in rules:
+        matches = await session.scalar(
+            select(Paper.id).where(
+                Paper.id == paper.id,
+                Paper.deleted_at.is_(None),
+                compile_filter(rule.filter),
+            )
+        )
+        if matches is None:
+            continue
+        applied += await _apply_actions(session, rule, [paper.id])
+        rule.last_run_at = datetime.now(UTC)
     await session.flush()
     return applied

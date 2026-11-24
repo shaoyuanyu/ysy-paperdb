@@ -510,6 +510,7 @@ class ResolveResponse(ApiModel):
 class ImportOptions(ApiModel):
     on_duplicate: Literal["skip", "link", "create"] = "skip"
     default_tags: list[str] = Field(default_factory=list)
+    default_collection_id: uuid.UUID | None = None
 
 
 class ImportIdentifiersRequest(ApiModel):
@@ -850,3 +851,41 @@ class FulltextSearchOut(ApiModel):
     query: str
     hits: list[SearchHitOut]
     has_more: bool = False
+
+
+class CitationPaperOut(ApiModel):
+    id: uuid.UUID
+    title: str
+    year: int
+    citekey: str
+
+
+class ExternalWorkOut(ApiModel):
+    id: uuid.UUID
+    title: str
+    year: int | None = None
+    doi: str | None = None
+    openalex_id: str | None = None
+    cited_by_count: int | None = None
+    resolved_paper_id: uuid.UUID | None = None
+
+
+class CitationItemOut(ApiModel):
+    in_library: bool
+    paper: CitationPaperOut | None = None
+    external: ExternalWorkOut | None = None
+    source: str
+
+
+class CitationPage(ApiModel):
+    items: list[CitationItemOut]
+    has_more: bool = False
+
+
+class CitationSyncRequest(ApiModel):
+    paper_ids: list[uuid.UUID] | None = None
+
+
+class CitationSyncCreated(ApiModel):
+    job_id: uuid.UUID
+    papers: int

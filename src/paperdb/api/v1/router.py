@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from paperdb.api.v1 import (
     annotations,
     authors,
+    citations,
     collections,
     exports,
     files,
@@ -26,6 +27,7 @@ api_router.include_router(authors.router)
 api_router.include_router(tokens.router)
 api_router.include_router(exports.router)
 api_router.include_router(imports.router)
+api_router.include_router(citations.router)
 api_router.include_router(collections.router)
 api_router.include_router(tags.router)
 api_router.include_router(views.router)

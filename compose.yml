@@ -40,7 +40,11 @@ services:
     depends_on:
       paperdb-db:
         condition: service_healthy
+      paperdb-api:
+        condition: service_healthy
     command: ["paperdb", "worker"]
+    healthcheck:
+      disable: true
     environment:
       <<: *paperdb-env
       PAPERDB_DATABASE_URL: postgresql+asyncpg://paperdb:${POSTGRES_PASSWORD:-paperdb_dev_password}@paperdb-db:5432/paperdb

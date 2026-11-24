@@ -894,3 +894,76 @@ class Annotation(UUIDPrimaryKey, Base):
         nullable=False,
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CitationEdge(UUIDPrimaryKey, Base):
+    __tablename__ = "citation_edge"
+    __table_args__ = (
+        UniqueConstraint("citing_paper_id", "cited_paper_id", name="uq_citation_edge"),
+        CheckConstraint("citing_paper_id <> cited_paper_id", name="ck_citation_self"),
+        Index("ix_citation_edge_citing", "citing_paper_id"),
+        Index("ix_citation_edge_cited", "cited_paper_id"),
+    )
+
+    citing_paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), nullable=False)
+    cited_paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="openalex", nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExternalWork(UUIDPrimaryKey, Base):
+    __tablename__ = "external_work"
+    __table_args__ = (
+        Index(
+            "uq_external_work_openalex",
+            "openalex_id",
+            unique=True,
+            postgresql_where=text("openalex_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_external_work_doi",
+            "doi",
+            unique=True,
+            postgresql_where=text("doi IS NOT NULL"),
+        ),
+    )
+
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    year: Mapped[int | None] = mapped_column(SmallInteger)
+    doi: Mapped[str | None] = mapped_column(String(255))
+    openalex_id: Mapped[str | None] = mapped_column(String(64))
+    s2_id: Mapped[str | None] = mapped_column(String(64))
+    cited_by_count: Mapped[int | None] = mapped_column(Integer)
+    resolved_paper_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("paper.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ExternalCitation(Base):
+    __tablename__ = "external_citation"
+    __table_args__ = (Index("ix_external_citation_work", "external_work_id"),)
+
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), primary_key=True)
+    external_work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("external_work.id"), primary_key=True
+    )
+    direction: Mapped[str] = mapped_column(String(16), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), default="openalex", nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CitationStat(Base):
+    __tablename__ = "citation_stat"
+
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date, primary_key=True)
+    cited_by_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

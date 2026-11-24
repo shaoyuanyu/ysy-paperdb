@@ -5,6 +5,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from paperdb.citations.service import sync_papers
 from paperdb.config import Settings
 from paperdb.db.models import IdentifierScheme, Job, PaperIdentifier, PdfFile
 from paperdb.imports.service import process_bibtex, process_import
@@ -144,3 +145,12 @@ async def handle_gc_blob(session: AsyncSession, job: Job, settings: Settings) ->
     )
     if count == 0:
         await get_storage().delete(key)
+
+
+async def handle_sync_citations(session: AsyncSession, job: Job, settings: Settings) -> None:
+    raw = job.payload.get("paper_ids") or []
+    paper_ids = [uuid.UUID(str(item)) for item in raw]
+    if not paper_ids:
+        return
+    await sync_papers(session, paper_ids, settings)
+    await session.flush()
