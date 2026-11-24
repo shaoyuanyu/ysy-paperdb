@@ -133,6 +133,8 @@ class PaperSummary(ApiModel):
     author_count: int = 0
     state: StateOut
     counts: CountsOut = Field(default_factory=CountsOut)
+    tags: list[str] = Field(default_factory=list)
+    collections: list[uuid.UUID] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     version: int
@@ -575,3 +577,209 @@ class MergeRequest(ApiModel):
 class EnrichCreated(ApiModel):
     job_id: uuid.UUID
     paper_id: uuid.UUID
+
+
+class CollectionOut(ApiModel):
+    id: uuid.UUID
+    parent_id: uuid.UUID | None = None
+    name: str
+    slug: str | None = None
+    description: str | None = None
+    position: int = 0
+    paper_count: int = 0
+    total_count: int = 0
+    children: list[CollectionOut] = Field(default_factory=list)
+
+
+class CollectionCreate(ApiModel):
+    parent_id: uuid.UUID | None = None
+    name: str
+    slug: str | None = None
+    description: str | None = None
+
+
+class CollectionUpdate(ApiModel):
+    name: str | None = None
+    slug: str | None = None
+    description: str | None = None
+
+
+class CollectionMove(ApiModel):
+    parent_id: uuid.UUID | None = None
+    position: int = 0
+
+
+class CollectionPapers(ApiModel):
+    paper_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    position: int | None = None
+
+
+class TagOut(ApiModel):
+    id: uuid.UUID
+    path: str
+    namespace: str
+    name: str
+    parent_id: uuid.UUID | None = None
+    color: str | None = None
+    description: str | None = None
+    paper_count: int = 0
+    children: list[TagOut] = Field(default_factory=list)
+
+
+class TagCreate(ApiModel):
+    path: str
+    color: str | None = None
+    description: str | None = None
+
+
+class TagUpdate(ApiModel):
+    name: str | None = None
+    color: str | None = None
+    description: str | None = None
+
+
+class TagMerge(ApiModel):
+    into_tag_id: uuid.UUID
+
+
+CollectionOut.model_rebuild()
+TagOut.model_rebuild()
+
+
+class PaperTagsInput(ApiModel):
+    paths: list[str] = Field(min_length=1, max_length=100)
+
+
+class PaperCollectionsInput(ApiModel):
+    collection_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class SavedViewCreate(ApiModel):
+    name: str
+    description: str | None = None
+    filter: dict = Field(default_factory=dict)
+    sort: list[dict] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
+    view_mode: str = "table"
+    is_pinned: bool = False
+    position: int = 0
+
+
+class SavedViewUpdate(ApiModel):
+    name: str | None = None
+    description: str | None = None
+    filter: dict | None = None
+    sort: list[dict] | None = None
+    columns: list[str] | None = None
+    view_mode: str | None = None
+    is_pinned: bool | None = None
+    position: int | None = None
+
+
+class SavedViewOut(ApiModel):
+    id: uuid.UUID
+    name: str
+    description: str | None = None
+    filter: dict
+    sort: list[dict]
+    columns: list[str]
+    view_mode: str
+    is_pinned: bool
+    position: int
+    count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ViewCountOut(ApiModel):
+    count: int
+
+
+class FilterValidateRequest(ApiModel):
+    filter: dict = Field(default_factory=dict)
+
+
+class FilterValidateOut(ApiModel):
+    valid: bool
+    rules: int
+
+
+class ProjectCreate(ApiModel):
+    name: str
+    description: str | None = None
+    citekey_template: str | None = None
+    export_include_abstract: bool = False
+
+
+class ProjectUpdate(ApiModel):
+    name: str | None = None
+    description: str | None = None
+    citekey_template: str | None = None
+    export_include_abstract: bool | None = None
+
+
+class ProjectOut(ApiModel):
+    id: uuid.UUID
+    name: str
+    description: str | None = None
+    citekey_template: str | None = None
+    export_include_abstract: bool = False
+    collection_ids: list[uuid.UUID] = Field(default_factory=list)
+    paper_ids: list[uuid.UUID] = Field(default_factory=list)
+    paper_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectCollectionsInput(ApiModel):
+    collection_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class ProjectPapersInput(ApiModel):
+    paper_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
+class AutoRuleCreate(ApiModel):
+    name: str
+    filter: dict = Field(default_factory=dict)
+    actions: list[dict] = Field(default_factory=list)
+    run_on: list[str] = Field(default_factory=lambda: ["manual"])
+    enabled: bool = True
+
+
+class AutoRuleUpdate(ApiModel):
+    name: str | None = None
+    filter: dict | None = None
+    actions: list[dict] | None = None
+    run_on: list[str] | None = None
+    enabled: bool | None = None
+
+
+class AutoRuleOut(ApiModel):
+    id: uuid.UUID
+    name: str
+    filter: dict
+    actions: list[dict]
+    run_on: list[str]
+    enabled: bool
+    last_run_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BulkPatch(ApiModel):
+    add_tags: list[str] = Field(default_factory=list)
+    remove_tags: list[str] = Field(default_factory=list)
+    add_collections: list[uuid.UUID] = Field(default_factory=list)
+    remove_collections: list[uuid.UUID] = Field(default_factory=list)
+    state: StateInput | None = None
+
+
+class PaperBulkRequest(ApiModel):
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    patch: BulkPatch
+
+
+class PaperBulkResult(ApiModel):
+    updated: int
+    failed: list[dict[str, str]] = Field(default_factory=list)

@@ -36,6 +36,7 @@ from paperdb.db.models import (
     VenueRank,
 )
 from paperdb.errors import ApiError
+from paperdb.organize.filters import compile_filter
 from paperdb.venues.rank import resolve_evaluation
 
 PAPER_OPTIONS = (
@@ -44,6 +45,8 @@ PAPER_OPTIONS = (
     selectinload(Paper.authors).selectinload(PaperAuthor.author),
     selectinload(Paper.identifiers),
     selectinload(Paper.state),
+    selectinload(Paper.tags),
+    selectinload(Paper.collections),
 )
 
 _STOPWORDS = {
@@ -543,6 +546,8 @@ def paper_to_summary(paper: Paper, ranks: dict[uuid.UUID, list[VenueRank]]) -> d
         "author_count": len(authors),
         "state": _state_out(paper),
         "counts": {"pdf_files": 0, "annotations": 0, "cited_by": 0},
+        "tags": sorted(tag.path for tag in paper.tags),
+        "collections": [collection.id for collection in paper.collections],
         "created_at": paper.created_at,
         "updated_at": paper.updated_at,
         "version": paper.version,
@@ -603,10 +608,13 @@ async def list_papers(
     venue_id: uuid.UUID | None,
     status: str | None,
     starred: bool | None,
+    filter_payload: dict[str, Any] | None,
     limit: int,
     cursor: str | None,
 ) -> tuple[list[Paper], str | None, bool]:
     stmt: Select = select(Paper).options(*PAPER_OPTIONS).where(Paper.deleted_at.is_(None))
+    if filter_payload:
+        stmt = stmt.where(compile_filter(filter_payload))
     if q:
         pattern = f"%{q.lower()}%"
         stmt = stmt.where(

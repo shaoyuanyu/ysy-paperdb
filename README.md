@@ -4,7 +4,7 @@ CS-native literature library backend. M1 scaffold: FastAPI + async SQLAlchemy +
 PostgreSQL, bearer-token auth, local content-addressed storage, CCF/CAS dataset
 import, and minimal papers/venues/authors CRUD.
 
-See [docs/README.md](docs/README.md) for the full design; implementation notes: [M1](docs/M1.md), [M2](docs/M2.md).
+See [docs/README.md](docs/README.md) for the full design; implementation notes: [M1](docs/M1.md), [M2](docs/M2.md), [M3](docs/M3.md).
 
 ## Quickstart (local, Podman Postgres)
 
@@ -99,13 +99,13 @@ Done and verified locally against PostgreSQL 17:
 - Postgres job queue + worker; identifier/BibTeX imports; dedupe/merge; BibTeX export
 - OpenAPI at `/openapi.json`; local content-addressed `StorageBackend`
 - Alembic migration, Dockerfile, compose, entrypoint migration, Podman image build verified
-- 40 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
+- 46 pytest tests (unit + real PostgreSQL integration), ruff and pyright clean
 
-M2 intentionally does **not** include collections/tags/views (M3), PDF
-files/annotations/reader (M4–M5b), citation sync (M6), or the frontend (M5a).
+M3 adds collections/tags/views/projects/auto-rules and bulk editing. It
+intentionally does **not** include PDF files/annotations/reader (M4–M5b),
+citation sync (M6), or the frontend (M5a).
 
-Next: M3 organization model and API (collections, namespaced hierarchical tags,
-saved views/filter DSL, projects, auto-rules), then M4 PDF.
+Next: M4 PDF storage/extraction/annotations, then M5a frontend and M5b reader.
 
 ## Development
 

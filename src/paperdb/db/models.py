@@ -389,6 +389,10 @@ class Paper(UUIDPrimaryKey, Timestamped, Base):
     state: Mapped[PaperState | None] = relationship(
         back_populates="paper", cascade="all, delete-orphan", uselist=False
     )
+    tags: Mapped[list[Tag]] = relationship("Tag", secondary="paper_tag", viewonly=True)
+    collections: Mapped[list[Collection]] = relationship(
+        "Collection", secondary="collection_paper", viewonly=True
+    )
 
 
 class PaperIdentifier(UUIDPrimaryKey, Base):
@@ -636,3 +640,142 @@ class MergeRedirect(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class Collection(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "collection"
+    __table_args__ = (
+        Index("ix_collection_parent_name", "parent_id", "name"),
+        Index("ix_collection_parent_position", "parent_id", "position"),
+    )
+
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("collection.id"))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    papers: Mapped[list[CollectionPaper]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+
+
+class CollectionPaper(Base):
+    __tablename__ = "collection_paper"
+    __table_args__ = (
+        Index("ix_collection_paper_paper", "paper_id"),
+        Index("ix_collection_paper_position", "collection_id", "position"),
+    )
+
+    collection_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("collection.id"), primary_key=True)
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), primary_key=True)
+    position: Mapped[int | None] = mapped_column(Integer)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    collection: Mapped[Collection] = relationship(back_populates="papers")
+
+
+class Tag(UUIDPrimaryKey, Base):
+    __tablename__ = "tag"
+    __table_args__ = (
+        UniqueConstraint("path", name="uq_tag_path"),
+        Index("ix_tag_namespace", "namespace"),
+        Index("ix_tag_parent", "parent_id"),
+    )
+
+    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tag.id"))
+    color: Mapped[str | None] = mapped_column(String(32))
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    papers: Mapped[list[PaperTag]] = relationship(
+        back_populates="tag", cascade="all, delete-orphan"
+    )
+
+
+class PaperTag(Base):
+    __tablename__ = "paper_tag"
+    __table_args__ = (Index("ix_paper_tag_tag", "tag_id"),)
+
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), primary_key=True)
+    tag_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tag.id"), primary_key=True)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    tag: Mapped[Tag] = relationship(back_populates="papers")
+
+
+class SavedView(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "saved_view"
+    __table_args__ = (UniqueConstraint("name", name="uq_saved_view_name"),)
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    filter: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    sort: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    columns: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    view_mode: Mapped[str] = mapped_column(String(16), default="table", nullable=False)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class AutoRule(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "auto_rule"
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    filter: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    run_on: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Project(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "project"
+    __table_args__ = (UniqueConstraint("name", name="uq_project_name"),)
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text)
+    citekey_template: Mapped[str | None] = mapped_column(String(255))
+    export_include_abstract: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    collections: Mapped[list[ProjectCollection]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    papers: Mapped[list[ProjectPaper]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class ProjectCollection(Base):
+    __tablename__ = "project_collection"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("project.id"), primary_key=True)
+    collection_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("collection.id"), primary_key=True)
+
+    project: Mapped[Project] = relationship(back_populates="collections")
+
+
+class ProjectPaper(Base):
+    __tablename__ = "project_paper"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("project.id"), primary_key=True)
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    project: Mapped[Project] = relationship(back_populates="papers")
