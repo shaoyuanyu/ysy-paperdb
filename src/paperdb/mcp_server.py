@@ -140,16 +140,23 @@ async def import_paper(
     query: str,
     tags: list[str] | None = None,
     collection_id: str | None = None,
+    on_duplicate: str = "link",
 ) -> str:
     """Import one paper into the library (identifier, title, or landing-page URL).
 
     The query is resolved through the metadata sources; duplicates are
-    detected by identifiers and linked instead of re-created. Optional
-    hierarchical tag paths (e.g. "topic/llm/rag") and a collection are applied
-    on import. Waits for the import job and returns the final per-item status
-    plus the imported paper (id, citekey, venue, evaluation).
+    detected by identifiers (linked, never re-created, and newly resolved
+    identifiers are merged into the existing entry) and by strong fuzzy
+    matches (exact title + year + first author) when on_duplicate is "link".
+    Optional hierarchical tag paths (e.g. "topic/llm/rag") and a collection
+    are applied on import. on_duplicate: "link" (default) also links strong
+    fuzzy matches; "skip" only links identifier duplicates without merging;
+    "create" always creates a new entry (use when the user deliberately
+    wants to keep two versions as separate entries). Waits for the import
+    job and returns the final per-item status plus the imported paper.
     """
-    options: dict[str, Any] = {"onDuplicate": "skip"}
+    valid = on_duplicate if on_duplicate in {"link", "skip", "create"} else "link"
+    options: dict[str, Any] = {"onDuplicate": valid}
     if tags:
         options["defaultTags"] = tags
     if collection_id:

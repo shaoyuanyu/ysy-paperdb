@@ -498,6 +498,7 @@ class ResolveCandidateOut(ApiModel):
     venue: VenueSuggestionOut | None = None
     evaluation: Evaluation
     duplicate_of: dict[str, str] | None = None
+    suggested_duplicate_of: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     pdf_urls: list[str] = Field(default_factory=list)
 
@@ -509,7 +510,11 @@ class ResolveResponse(ApiModel):
 
 
 class ImportOptions(ApiModel):
-    on_duplicate: Literal["skip", "link", "create"] = "skip"
+    # link (default): identifier duplicates link (+identifier merge); strong
+    # fuzzy matches (exact title + year + first author) link too.
+    # skip: identifier duplicates are skipped without linking; fuzzy stays
+    # suggestion-only. create: never dedupe, always create a new paper.
+    on_duplicate: Literal["skip", "link", "create"] = "link"
     default_tags: list[str] = Field(default_factory=list)
     default_collection_id: uuid.UUID | None = None
 

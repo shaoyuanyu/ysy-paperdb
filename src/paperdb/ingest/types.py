@@ -80,6 +80,10 @@ class Candidate:
     issue: str | None = None
     pages: str | None = None
     duplicate_of: dict[str, str] | None = None
+    # Fuzzy in-library match (exact normalized title, year proximity): a
+    # *suggestion* only — the import flow decides whether to auto-link
+    # (onDuplicate="link" and the match is strong) or to just warn.
+    suggested_duplicate_of: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     citekey: str | None = None
     # Open-access PDF links discovered on the landing page (or elsewhere),

@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from paperdb.config import Settings
 from paperdb.db.models import Paper
 from paperdb.errors import ApiError
-from paperdb.imports.service import _paper_payload
+from paperdb.imports.service import _paper_payload, merge_new_identifiers
 from paperdb.ingest.http import build_client
-from paperdb.ingest.resolve import resolve_input
+from paperdb.ingest.resolve import fuzzy_library_match, resolve_input
 from paperdb.ingest.types import AuthorRecord, Candidate
 from paperdb.ingest.venue_resolve import ensure_venue
 from paperdb.papers.service import create_paper, normalize_title
@@ -138,19 +138,35 @@ async def _paper_for_candidate(
     candidate: Candidate,
     *,
     title_match_doi: str | None,
-) -> tuple[Paper, bool]:
+) -> tuple[Paper, bool, list[str]]:
     """Create (or link) the Paper for a resolved candidate.
 
-    Mirrors the upload flow: identifier duplicate first, then a
-    normalized-title match only when a DOI corroborates it, else create.
+    Mirrors the import flow: identifier duplicate first (with identifier
+    merge), then a strong fuzzy match (exact title + year + first author),
+    then a normalized-title match only when a DOI corroborates it, else
+    create. Returns (paper, created, notes).
     """
-    duplicate_id = candidate.duplicate_of.get("paperId") if candidate.duplicate_of else None
+    notes: list[str] = []
+    duplicate_id = None
+    if candidate.duplicate_of:
+        duplicate_id = candidate.duplicate_of.get("paperId")
+    if not duplicate_id:
+        # PDF-fallback candidates never went through resolve_input; compute
+        # the fuzzy match here so identifier-less PDFs of existing entries
+        # (e.g. re-uploads of zero-identifier papers) still link.
+        suggestion = candidate.suggested_duplicate_of
+        if suggestion is None:
+            suggestion = await fuzzy_library_match(session, candidate)
+        if suggestion and suggestion.get("strong"):
+            duplicate_id = str(suggestion["paperId"])
+            notes.append(f"linked by {suggestion.get('evidence', 'fuzzy')} match")
     if duplicate_id:
-        existing = await session.get(Paper, uuid.UUID(duplicate_id))
-        if existing is None or existing.deleted_at is not None:
-            duplicate_id = None
-    if duplicate_id:
-        return existing, False  # type: ignore[return-value]
+        row = await session.get(Paper, uuid.UUID(duplicate_id))
+        if row is not None and row.deleted_at is None:
+            merged = await merge_new_identifiers(session, row, candidate.identifiers)
+            if merged:
+                notes.append(f"+{len(merged)} identifier(s) merged")
+            return row, False, notes
 
     existing_by_title = await session.scalar(
         select(Paper).where(
@@ -159,7 +175,7 @@ async def _paper_for_candidate(
         )
     )
     if existing_by_title is not None and title_match_doi:
-        return existing_by_title, False
+        return existing_by_title, False, notes
 
     venue = None
     edition = None
@@ -186,7 +202,7 @@ async def _paper_for_candidate(
             session,
             _paper_payload(candidate, venue.id if venue else None, edition.id if edition else None),
         )
-    return paper, True
+    return paper, True, notes
 
 
 def _fallback_candidate(meta: PdfMetadata, warnings: list[str]) -> Candidate:
@@ -263,9 +279,10 @@ async def import_pdf(
         candidate = _fallback_candidate(meta, warnings)
         warnings.append("created from PDF metadata; external metadata not matched")
 
-    paper, created = await _paper_for_candidate(
+    paper, created, link_notes = await _paper_for_candidate(
         session, candidate, title_match_doi=meta.doi
     )
+    warnings.extend(link_notes)
     file, job_id = await create_file(
         session,
         paper=paper,
@@ -368,12 +385,18 @@ async def import_pdf_from_url(
                 "; ".join(warnings) or "landing page gave no usable paper metadata",
             )
 
-        paper, created = await _paper_for_candidate(
+        paper, created, link_notes = await _paper_for_candidate(
             session, candidate, title_match_doi=_candidate_doi(candidate)
         )
+        warnings.extend(link_notes)
 
         if data is None:
-            warnings.append("no PDF link found on page; imported metadata only")
+            if candidate.pdf_urls:
+                warnings.append(
+                    "PDF link(s) found on page but none downloadable; imported metadata only"
+                )
+            else:
+                warnings.append("no PDF link found on page; imported metadata only")
             await session.flush()
             return PdfImportResult(
                 paper=paper,

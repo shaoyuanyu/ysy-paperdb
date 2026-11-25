@@ -545,3 +545,288 @@ async def test_resolve_unreachable_landing_page() -> None:
         )
     assert candidate is None
     assert any("unreachable" in warning for warning in warnings)
+
+
+async def test_title_search_rejects_unrelated_results() -> None:
+    """Search engines answer any text with *some* paper; the title branch
+    must drop results whose title does not plausibly answer the query."""
+    unrelated = {
+        "results": [
+            {
+                "title": "The Batiandi Family: 八天地",
+                "publication_year": 2020,
+                "type": "article-journal",
+                "ids": {},
+                "id": "https://openalex.org/W9",
+                "authorships": [{"author": {"display_name": "Someone"}}],
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "dblp.org/search" in url:
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        if "openalex.org" in url:
+            return httpx.Response(200, json=unrelated)
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session, "今天天气不错适合出去玩", get_settings(), client=client
+        )
+    assert candidate is None
+    assert "no metadata source" in warnings[0]
+
+
+async def test_resolve_fuzzy_suggestion_for_zero_identifier_entry(
+    client: httpx.AsyncClient,
+) -> None:
+    """A library entry without identifiers (PDF fallback / legacy import)
+    is invisible to identifier dedup; resolve must surface a fuzzy
+    suggestion instead of silently creating a second entry."""
+    title = f"Zero Identifier Paper {uuid.uuid4().hex[:8]}"
+    created = await client.post(
+        "/v1/papers",
+        headers=SERVICE,
+        json={
+            "kind": "preprint",
+            "title": title,
+            "year": 2026,
+            "authors": [{"displayName": "Alice Example"}],
+            "identifiers": [],
+        },
+    )
+    assert created.status_code == 201, created.text
+    paper_id = created.json()["id"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "dblp.org/search" in url:
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        if "openalex.org" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "title": title,
+                            "publication_year": 2026,
+                            "type": "proceedings-article",
+                            "doi": f"https://doi.org/10.9999/{uuid.uuid4().hex}",
+                            "ids": {"openalex": "W77"},
+                            "id": "https://openalex.org/W77",
+                            "primary_location": {"source": {"display_name": "Test Venue"}},
+                            "authorships": [{"author": {"display_name": "Alice Example"}}],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client_,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(session, title, get_settings(), client=client_)
+    assert candidate is not None, warnings
+    assert candidate.duplicate_of is None
+    assert candidate.suggested_duplicate_of is not None
+    assert candidate.suggested_duplicate_of["paperId"] == paper_id
+    assert candidate.suggested_duplicate_of["strong"] is True
+    assert candidate.suggested_duplicate_of["authorMatch"] is True
+    assert any("possible duplicate" in warning for warning in warnings)
+
+
+async def _fuzzy_import_case(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    on_duplicate: str | None,
+) -> dict:
+    """Shared driver: library paper without identifiers; an import resolves
+    to the same title with fresh identifiers."""
+    title = f"Fuzzy Link Paper {uuid.uuid4().hex[:8]}"
+    doi = f"10.9999/{uuid.uuid4().hex}"
+    arxiv = f"2601.{uuid.uuid4().int % 90000 + 10000:05d}"
+    created = await client.post(
+        "/v1/papers",
+        headers=SERVICE,
+        json={
+            "kind": "preprint",
+            "title": title,
+            "year": 2026,
+            "authors": [{"displayName": "Alice Example"}],
+        },
+    )
+    assert created.status_code == 201, created.text
+    existing_id = created.json()["id"]
+
+    async def fake_resolve(session, raw, settings, *, client=None):
+        candidate = Candidate(
+            confidence=0.8,
+            sources=["openalex"],
+            kind="preprint",
+            title=title,
+            abstract="An abstract.",
+            year=2026,
+            publication_date=None,
+            authors=[AuthorRecord(name="Alice Example", family="Example", given="Alice")],
+            identifiers=[
+                {"scheme": "doi", "value": doi, "isPrimary": True},
+                {"scheme": "arxiv", "value": arxiv, "isPrimary": False},
+            ],
+            venue=None,
+            evaluation={"ccf": None, "cas": None},
+            warnings=[],
+        )
+        candidate.suggested_duplicate_of = {
+            "paperId": existing_id,
+            "citekey": created.json()["citekey"],
+            "title": title,
+            "year": 2026,
+            "yearDelta": 0,
+            "authorMatch": True,
+            "strong": True,
+            "evidence": "exact-title+year(0)+first-author",
+        }
+        return candidate, []
+
+    monkeypatch.setattr("paperdb.imports.service.resolve_input", fake_resolve)
+
+    options: dict = {"defaultTags": ["status/to-read"]}
+    if on_duplicate is not None:
+        options["onDuplicate"] = on_duplicate
+    response = await client.post(
+        "/v1/imports/identifiers",
+        headers=SERVICE,
+        json={"items": [f"title:{title}"], "options": options},
+    )
+    assert response.status_code == 202, response.text
+    import_id = response.json()["importId"]
+
+    from paperdb.jobs.worker import run_once
+
+    assert await run_once() is True
+    job = await client.get(f"/v1/imports/{import_id}", headers=SERVICE)
+    items = await client.get(f"/v1/imports/{import_id}/items", headers=SERVICE)
+    return {
+        "job": job.json(),
+        "items": items.json(),
+        "existingId": existing_id,
+        "doi": doi,
+    }
+
+
+async def test_import_fuzzy_autolink_and_identifier_merge(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default onDuplicate=link: a strong fuzzy match links to the existing
+    entry and merges the newly resolved identifiers into it."""
+    result = await _fuzzy_import_case(client, monkeypatch, on_duplicate=None)
+    item = result["items"][0]
+    assert item["status"] == "duplicate", item
+    assert item["paperId"] == result["existingId"]
+    assert item["error"] and "identifier(s) merged" in item["error"]
+    assert result["job"]["stats"]["duplicates"] == 1
+
+    paper = (
+        await client.get(f"/v1/papers/{result['existingId']}", headers=SERVICE)
+    ).json()
+    schemes = {identifier["scheme"] for identifier in paper["identifiers"]}
+    assert schemes == {"doi", "arxiv"}, paper["identifiers"]
+    # default tags apply to linked entries too
+    assert "status/to-read" in paper.get("tags", [])
+
+
+async def test_import_on_duplicate_create(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """onDuplicate=create deliberately keeps a separate entry."""
+    result = await _fuzzy_import_case(client, monkeypatch, on_duplicate="create")
+    item = result["items"][0]
+    assert item["status"] == "created", item
+    assert item["paperId"] != result["existingId"]
+    assert result["job"]["stats"]["created"] == 1
+
+
+async def test_import_on_duplicate_skip(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """onDuplicate=skip: fuzzy matches stay suggestion-only (new entry);
+    the linked entry's identifiers are not touched."""
+    result = await _fuzzy_import_case(client, monkeypatch, on_duplicate="skip")
+    item = result["items"][0]
+    assert item["status"] == "created", item
+    paper = (
+        await client.get(f"/v1/papers/{result['existingId']}", headers=SERVICE)
+    ).json()
+    assert paper["identifiers"] == []
+
+
+async def test_import_identifier_duplicate_merges_new_identifiers(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cross-version import: library holds the DOI version, the arXiv
+    version resolves with both identifiers → linked, arXiv id merged in."""
+    title = f"Cross Version Paper {uuid.uuid4().hex[:8]}"
+    doi = f"10.9999/{uuid.uuid4().hex}"
+    created = await client.post(
+        "/v1/papers",
+        headers=SERVICE,
+        json={
+            "kind": "preprint",
+            "title": title,
+            "year": 2026,
+            "identifiers": [{"scheme": "doi", "value": doi}],
+        },
+    )
+    assert created.status_code == 201, created.text
+    existing_id = created.json()["id"]
+
+    async def fake_resolve(session, raw, settings, *, client=None):
+        candidate = Candidate(
+            confidence=0.8,
+            sources=["s2"],
+            kind="preprint",
+            title=title,
+            abstract=None,
+            year=2026,
+            publication_date=None,
+            authors=[],
+            identifiers=[
+                {"scheme": "arxiv", "value": "2601.08888", "isPrimary": False},
+                {"scheme": "doi", "value": doi, "isPrimary": True},
+            ],
+            venue=None,
+            evaluation={"ccf": None, "cas": None},
+            warnings=[],
+        )
+        candidate.duplicate_of = {"paperId": existing_id, "citekey": created.json()["citekey"]}
+        return candidate, []
+
+    monkeypatch.setattr("paperdb.imports.service.resolve_input", fake_resolve)
+    response = await client.post(
+        "/v1/imports/identifiers",
+        headers=SERVICE,
+        json={"items": ["arXiv:2601.08888"]},
+    )
+    assert response.status_code == 202, response.text
+    import_id = response.json()["importId"]
+
+    from paperdb.jobs.worker import run_once
+
+    assert await run_once() is True
+    items = (await client.get(f"/v1/imports/{import_id}/items", headers=SERVICE)).json()
+    assert items[0]["status"] == "duplicate"
+    assert items[0]["paperId"] == existing_id
+
+    paper = (await client.get(f"/v1/papers/{existing_id}", headers=SERVICE)).json()
+    values = {
+        (identifier["scheme"], identifier["value"]) for identifier in paper["identifiers"]
+    }
+    assert ("arxiv", "2601.08888") in values
+    assert ("doi", doi) in values

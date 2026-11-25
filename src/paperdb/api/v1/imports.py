@@ -91,6 +91,7 @@ def _candidate_out(candidate) -> ResolveCandidateOut:
         ),
         evaluation=Evaluation.model_validate(candidate.evaluation),
         duplicate_of=candidate.duplicate_of,
+        suggested_duplicate_of=getattr(candidate, "suggested_duplicate_of", None),
         warnings=candidate.warnings,
         pdf_urls=getattr(candidate, "pdf_urls", []),
     )

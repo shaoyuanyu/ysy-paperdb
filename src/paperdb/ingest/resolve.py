@@ -26,6 +26,7 @@ from paperdb.ingest.page import fetch_page
 from paperdb.ingest.s2 import fetch_s2
 from paperdb.ingest.types import AuthorRecord, Candidate, InputRef, SourceRecord
 from paperdb.ingest.venue_resolve import suggest_venue
+from paperdb.papers.service import normalize_title
 from paperdb.venues.normalize import normalize_name
 from paperdb.venues.rank import resolve_evaluation
 
@@ -98,6 +99,27 @@ def _similar(left: str, right: str) -> bool:
     return a == b or SequenceMatcher(None, a, b).ratio() >= 0.92
 
 
+def _title_matches(query: str, result_title: str | None) -> bool:
+    """Accept a title-search result only when it plausibly answers the query.
+
+    Aggregator search returns *some* paper for almost any text (verified: a
+    Chinese small-talk string returns an unrelated paper). Guard the import
+    path with: exact normalized equality, near-exact similarity, or most of
+    the query's tokens appearing in the result title.
+    """
+    if not result_title:
+        return False
+    q = normalize_title(query)
+    r = normalize_title(result_title)
+    if not q or not r:
+        return False
+    if q == r or SequenceMatcher(None, q, r).ratio() >= 0.92:
+        return True
+    q_tokens = set(q.split())
+    r_tokens = set(r.split())
+    return bool(q_tokens) and len(q_tokens & r_tokens) / len(q_tokens) >= 0.6
+
+
 def _merge_authors(records: list[SourceRecord], order: list[str]) -> list[AuthorRecord]:
     by_source = {record.source: record for record in records}
     source_with_most = None
@@ -161,6 +183,70 @@ def _identifiers(records: list[SourceRecord]) -> list[dict[str, str | bool]]:
         {"scheme": scheme, "value": value, "isPrimary": (scheme, value) == primary}
         for scheme, value in values
     ]
+
+
+def _first_author_family(name: str | None) -> str | None:
+    tokens = (name or "").split()
+    return tokens[-1].lower() if tokens else None
+
+
+async def fuzzy_library_match(
+    session: AsyncSession, candidate: Candidate
+) -> dict[str, Any] | None:
+    """Exact-normalized-title match against the library (suggestion only).
+
+    Papers imported without identifiers (PDF fallback, old imports) are
+    invisible to the identifier-level duplicate check; this closes that hole
+    at the only precision level fuzzy matching is allowed: exact normalized
+    title, with year proximity and first-author agreement as corroboration.
+    """
+    normalized = normalize_title(candidate.title)
+    if not normalized:
+        return None
+    rows = list(
+        (
+            await session.scalars(
+                select(Paper)
+                .where(Paper.title_normalized == normalized, Paper.deleted_at.is_(None))
+                .limit(5)
+            )
+        ).all()
+    )
+    if not rows:
+        return None
+
+    def year_delta(row: Paper) -> int | None:
+        if row.year is None:
+            return None
+        return abs(row.year - candidate.year)
+
+    def delta_or_big(row: Paper) -> int:
+        delta = year_delta(row)
+        return delta if delta is not None else 999
+
+    best = min(rows, key=delta_or_big)
+    delta = year_delta(best)
+    candidate_first = _first_author_family(candidate.authors[0].name if candidate.authors else None)
+    library_first = _first_author_family((best.paper_author_names or "").split(",")[0])
+    author_match: bool | None = None
+    if candidate_first and library_first:
+        author_match = candidate_first == library_first
+    strong = delta is not None and delta <= 1 and author_match is not False
+    evidence = "exact-title"
+    if delta is not None:
+        evidence += f"+year({delta})"
+    if author_match:
+        evidence += "+first-author"
+    return {
+        "paperId": str(best.id),
+        "citekey": best.citekey,
+        "title": best.title,
+        "year": best.year,
+        "yearDelta": delta,
+        "authorMatch": author_match,
+        "strong": strong,
+        "evidence": evidence,
+    }
 
 
 async def _duplicate(
@@ -290,6 +376,9 @@ async def _collect(
                 found.extend(result)
             elif isinstance(result, SourceRecord):
                 found.append(result)
+        # Search engines rank by relevance but still answer *any* query with
+        # *some* paper; drop results whose title does not plausibly match.
+        found = [record for record in found if _title_matches(ref.value, record.title)]
         return found, "title"
     elif ref.kind == "acl":
         record = await fetch_acl(client, ref.value, settings)
@@ -416,6 +505,11 @@ async def resolve_input(
     candidate.duplicate_of = await _duplicate(session, candidate.identifiers)
     if candidate.duplicate_of:
         warnings.append("already in library")
+    elif (suggested := await fuzzy_library_match(session, candidate)) is not None:
+        candidate.suggested_duplicate_of = suggested
+        warnings.append(
+            f"possible duplicate in library: {suggested['citekey']} — {suggested['title']}"
+        )
     candidate.confidence = min(
         0.55
         + 0.15 * (len(candidate.sources) - 1)

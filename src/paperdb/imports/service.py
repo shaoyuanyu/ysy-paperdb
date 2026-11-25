@@ -21,16 +21,24 @@ from paperdb.config import Settings
 from paperdb.db.models import (
     Collection,
     CollectionPaper,
+    IdentifierScheme,
     ImportItem,
     ImportItemStatus,
     ImportJob,
     ImportKind,
     JobStatus,
     Paper,
+    PaperIdentifier,
     PaperTag,
 )
 from paperdb.errors import ApiError
-from paperdb.ingest.resolve import evaluate_venue, find_duplicate, resolve_input, suggest_venue
+from paperdb.ingest.resolve import (
+    evaluate_venue,
+    find_duplicate,
+    fuzzy_library_match,
+    resolve_input,
+    suggest_venue,
+)
 from paperdb.ingest.types import Candidate
 from paperdb.ingest.venue_resolve import ensure_venue
 from paperdb.jobs.queue import enqueue
@@ -42,9 +50,89 @@ from paperdb.papers.bibtex_import import (
     entry_to_candidate,
     parse_bibtex,
 )
-from paperdb.papers.service import create_paper
+from paperdb.papers.service import create_paper, normalize_identifier
 
 _BIBTEX_ENTRY_RE = re.compile(r"^\s*@[A-Za-z]+\s*[{(]")
+
+
+async def merge_new_identifiers(
+    session: AsyncSession, paper: Paper, identifiers: list[dict[str, str | bool]]
+) -> list[str]:
+    """Attach newly resolved identifiers to an existing paper.
+
+    Cross-version imports (arXiv preprint vs published DOI) resolve through
+    S2 with both ids; merging them into the surviving entry records the
+    version linkage and makes future dedup work. Identifiers already owned
+    by another paper are skipped silently.
+    """
+    added: list[str] = []
+    for identifier in identifiers:
+        try:
+            scheme = IdentifierScheme(str(identifier.get("scheme", "")))
+        except ValueError:
+            continue
+        value = str(identifier.get("value", ""))
+        normalized = normalize_identifier(scheme, value)
+        existing = await session.scalar(
+            select(PaperIdentifier).where(
+                PaperIdentifier.scheme == scheme,
+                PaperIdentifier.normalized == normalized,
+            )
+        )
+        if existing is not None:
+            continue
+        session.add(
+            PaperIdentifier(
+                paper_id=paper.id,
+                scheme=scheme,
+                raw_value=value,
+                normalized=normalized,
+                is_primary=False,
+                source="import",
+            )
+        )
+        added.append(f"{scheme.value}:{normalized}")
+    if added:
+        await session.flush()
+    return added
+
+
+def _duplicate_decision(
+    candidate: Candidate, on_duplicate: str
+) -> tuple[str | None, str | None]:
+    """Decide whether an import links to an existing paper.
+
+    Returns (duplicate_paper_id, note). Identifier matches always win;
+    a *strong* fuzzy match (exact normalized title, year within 1, first
+    author not contradicting) additionally links under onDuplicate="link".
+    """
+    if candidate.duplicate_of and on_duplicate != "create":
+        return candidate.duplicate_of["paperId"], None
+    if (
+        candidate.duplicate_of is None
+        and on_duplicate == "link"
+        and candidate.suggested_duplicate_of
+        and candidate.suggested_duplicate_of.get("strong")
+    ):
+        suggested = candidate.suggested_duplicate_of
+        note = f"linked by {suggested.get('evidence', 'fuzzy')} match"
+        return str(suggested["paperId"]), note
+    return None, None
+
+
+async def _apply_import_options(
+    session: AsyncSession, paper: Paper, options: dict
+) -> None:
+    for path in options.get("defaultTags") or []:
+        tag = await ensure_tag_path(session, str(path))
+        if await session.get(PaperTag, (paper.id, tag.id)) is None:
+            session.add(PaperTag(paper_id=paper.id, tag_id=tag.id))
+    if options.get("defaultCollectionId"):
+        collection = await session.get(Collection, uuid.UUID(str(options["defaultCollectionId"])))
+        if collection is not None and (
+            await session.get(CollectionPaper, (collection.id, paper.id)) is None
+        ):
+            session.add(CollectionPaper(collection_id=collection.id, paper_id=paper.id))
 
 
 def _stats(items: list[ImportItem]) -> dict[str, int]:
@@ -204,10 +292,28 @@ async def process_import(
             candidate, warnings = await resolve_input(session, item.raw_input, settings)
             if candidate is None:
                 raise ApiError(422, "resolve_failed", "; ".join(warnings) or "metadata not found")
-            if candidate.duplicate_of:
-                existing = await session.get(Paper, uuid.UUID(candidate.duplicate_of["paperId"]))
-                item.status = ImportItemStatus.duplicate
-                item.paper_id = existing.id if existing else None
+            options = (import_job.input or {}).get("options") or {}
+            on_duplicate = str(options.get("onDuplicate") or "link")
+            duplicate_id, note = _duplicate_decision(candidate, on_duplicate)
+            existing = None
+            if duplicate_id:
+                row = await session.get(Paper, uuid.UUID(duplicate_id))
+                if row is not None and row.deleted_at is None:
+                    existing = row
+            if existing is not None:
+                if on_duplicate == "skip":
+                    item.status = ImportItemStatus.skipped
+                else:
+                    merged = await merge_new_identifiers(session, existing, candidate.identifiers)
+                    if merged:
+                        note = f"{note}; " if note else ""
+                        note += f"+{len(merged)} identifier(s) merged"
+                    item.status = ImportItemStatus.duplicate
+                    item.paper_id = existing.id
+                    await _apply_import_options(session, existing, options)
+                    await apply_rules_on(session, existing, "import")
+                if note:
+                    item.error = note  # informational; status stays duplicate/skipped
             else:
                 venue = None
                 edition = None
@@ -229,19 +335,7 @@ async def process_import(
                         edition.id if edition else None,
                     ),
                 )
-                options = (import_job.input or {}).get("options") or {}
-                for path in options.get("defaultTags") or []:
-                    tag = await ensure_tag_path(session, str(path))
-                    if await session.get(PaperTag, (paper.id, tag.id)) is None:
-                        session.add(PaperTag(paper_id=paper.id, tag_id=tag.id))
-                if options.get("defaultCollectionId"):
-                    collection = await session.get(
-                        Collection, uuid.UUID(str(options["defaultCollectionId"]))
-                    )
-                    if collection is not None and (
-                        await session.get(CollectionPaper, (collection.id, paper.id)) is None
-                    ):
-                        session.add(CollectionPaper(collection_id=collection.id, paper_id=paper.id))
+                await _apply_import_options(session, paper, options)
                 await apply_rules_on(session, paper, "import")
                 item.status = ImportItemStatus.created
                 item.paper_id = paper.id
@@ -338,6 +432,8 @@ async def _bib_venue(session: AsyncSession, candidate: Candidate) -> None:
             session, candidate.venue.venue_id, candidate.year
         )
     candidate.duplicate_of = await find_duplicate(session, candidate.identifiers)
+    if candidate.duplicate_of is None:
+        candidate.suggested_duplicate_of = await fuzzy_library_match(session, candidate)
 
 
 async def process_bibtex(
@@ -402,10 +498,23 @@ async def process_bibtex(
                 await _bib_venue(session, candidate)
             else:
                 candidate.duplicate_of = await find_duplicate(session, candidate.identifiers)
-            if candidate.duplicate_of:
-                existing = await session.get(Paper, uuid.UUID(candidate.duplicate_of["paperId"]))
+                if candidate.duplicate_of is None:
+                    candidate.suggested_duplicate_of = await fuzzy_library_match(session, candidate)
+            duplicate_id, note = _duplicate_decision(candidate, "link")
+            existing = None
+            if duplicate_id:
+                row = await session.get(Paper, uuid.UUID(duplicate_id))
+                if row is not None and row.deleted_at is None:
+                    existing = row
+            if existing is not None:
+                merged = await merge_new_identifiers(session, existing, candidate.identifiers)
+                if merged:
+                    note = f"{note}; " if note else ""
+                    note += f"+{len(merged)} identifier(s) merged"
                 item.status = ImportItemStatus.duplicate
-                item.paper_id = existing.id if existing else None
+                item.paper_id = existing.id
+                if note:
+                    item.error = note  # informational; status stays duplicate
             else:
                 venue = None
                 edition = None

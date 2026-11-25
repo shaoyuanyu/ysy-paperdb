@@ -710,10 +710,23 @@ If-Match: "3"            # 可选，乐观锁
     "defaultCollectionId": "...",
     "defaultTags": ["status:needs-review"],
     "autoCreateMissingVenues": true,
-    "onDuplicate": "skip|link|create"
+    "onDuplicate": "link"
   }
 }
 ```
+
+`onDuplicate` 语义（默认 `link`）：
+
+| 值 | 标识符精确命中 | 强模糊命中（规范标题精确 + 年份 ±1 + 一作不矛盾） |
+|---|---|---|
+| `link` | 链接已有条目，并把新解析出的标识符合并进去（跨版本场景：库里是 DOI 版，导入 arXiv 版后条目同时持有两个标识符） | 同样链接 + 合并；item 的 `error` 字段带证据说明（如 `linked by exact-title+year(0)+first-author match; +1 identifier(s) merged`） |
+| `skip` | 标记 skipped，不链接不合并 | 只按建议处理（照常新建，resolve 端已有 warning） |
+| `create` | 强制新建（用户刻意保留两个独立条目时用） | 同左 |
+
+resolve 候选新增 `suggestedDuplicateOf`（`paperId`/`citekey`/`year`/`yearDelta`/`authorMatch`/`strong`/`evidence`）与
+`possible duplicate in library: …` warning；命中条件为规范标题精确匹配（标识符为空的库内条目——PDF 回退导入、旧数据——靠它兜住）。
+标题搜索结果带相关性护栏：查询与结果标题无可信对应（精确/近似/词覆盖）时按无结果处理，
+避免"任意文本都能搜出某篇论文"的误导入。
 
 响应 `202 Accepted`：
 
