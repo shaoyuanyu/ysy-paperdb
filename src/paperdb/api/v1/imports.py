@@ -19,6 +19,7 @@ from paperdb.api.schemas import (
     ImportPage,
     JobOut,
     PdfImportCreated,
+    PdfUrlImportRequest,
     ResolveCandidateOut,
     ResolveRequest,
     ResolveResponse,
@@ -29,7 +30,7 @@ from paperdb.config import Settings, get_settings
 from paperdb.db.models import ImportItem, ImportJob, Job
 from paperdb.db.session import get_session
 from paperdb.errors import ApiError
-from paperdb.imports.pdf_import import import_pdf
+from paperdb.imports.pdf_import import import_pdf, import_pdf_from_url
 from paperdb.imports.service import (
     cancel_import,
     create_bibtex_import_job,
@@ -91,6 +92,7 @@ def _candidate_out(candidate) -> ResolveCandidateOut:
         evaluation=Evaluation.model_validate(candidate.evaluation),
         duplicate_of=candidate.duplicate_of,
         warnings=candidate.warnings,
+        pdf_urls=getattr(candidate, "pdf_urls", []),
     )
 
 
@@ -147,6 +149,35 @@ async def import_pdf_endpoint(
         session,
         data=data,
         filename=file.filename,
+        settings=settings,
+    )
+    await session.commit()
+    return PdfImportCreated(
+        paper_id=result.paper.id,
+        file_id=result.file_id,
+        job_id=result.job_id,
+        created=result.created,
+        title=result.title,
+        warnings=result.warnings,
+    )
+
+
+@router.post(
+    "/imports/pdf-url",
+    response_model=PdfImportCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_pdf_url_endpoint(
+    payload: PdfUrlImportRequest,
+    principal: TokenPrincipal = Depends(scoped("papers:write")),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> PdfImportCreated:
+    """Import a paper (with PDF, when reachable) from a landing-page URL."""
+    result = await import_pdf_from_url(
+        session,
+        url=payload.url,
+        filename=payload.filename,
         settings=settings,
     )
     await session.commit()

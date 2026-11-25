@@ -499,6 +499,7 @@ class ResolveCandidateOut(ApiModel):
     evaluation: Evaluation
     duplicate_of: dict[str, str] | None = None
     warnings: list[str] = Field(default_factory=list)
+    pdf_urls: list[str] = Field(default_factory=list)
 
 
 class ResolveResponse(ApiModel):
@@ -893,8 +894,13 @@ class CitationSyncCreated(ApiModel):
 
 class PdfImportCreated(ApiModel):
     paper_id: uuid.UUID
-    file_id: uuid.UUID
+    file_id: uuid.UUID | None = None
     job_id: uuid.UUID | None = None
     created: bool
     title: str
     warnings: list[str] = Field(default_factory=list)
+
+
+class PdfUrlImportRequest(ApiModel):
+    url: str = Field(min_length=8, max_length=2000)
+    filename: str | None = Field(default=None, max_length=255)

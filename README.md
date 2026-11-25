@@ -115,6 +115,37 @@ citation edges/stubs. M7 adds the deploy/backup/runbook.
 
 Next: production smoke + periodic citation sync; optional graph canvas.
 
+## Agent integration (MCP server + skill)
+
+`src/paperdb/mcp_server.py` wraps the HTTP API as an MCP stdio server
+(`uv sync --extra mcp`, then `.venv/bin/paperdb-mcp`), exposing 10 tools:
+`resolve`, `import_paper`, `import_paper_with_pdf`, `import_bibtex`,
+`get_paper`, `search_papers`, `add_tags`, `add_to_collection`,
+`list_collections`, `get_import`. Import tools poll their job and return the
+final per-item status plus the paper. Configuration via env:
+`PAPERDB_MCP_BASE_URL` (default `http://127.0.0.1:9720`) and
+`PAPERDB_MCP_TOKEN` (required).
+
+The DeepSeek Harness registration lives at the workspace root in
+`for-agents/mcp/dsh-paperdb-mcp/` (bundle inserting `@deepseek-ai/dsh-mcp-client`,
+stdio, server name `paperdb` → tools appear as `mcp__paperdb__*`; currently
+targeting the production VPS API through an SSH tunnel, see the patch header).
+The `my-paperdb` skill's real file lives at `for-agents/skills/my-paperdb/`
+(workspace root, next to the MCP bundle); `~/.agents/skills/my-paperdb` and
+`.dsh/skills/my-paperdb` in this repo are symlinks to it, so every DSH session
+discovers it through the user-agents root and sessions inside this repo also
+see it via the project `.dsh/skills` root. It teaches agents the import
+ladder (URL → identifier → BibTeX → PDF → WeChat-article-to-title), the
+verify-before-reporting rules, and the OA PDF acquisition paths.
+
+Landing-page ingestion (2026-11): `resolve` and all import entry points accept
+any paper page URL. The page is fetched, mined for `citation_*`/og/H1/DOI/
+arXiv/PDF links (`ingest/page.py`), then resolved through the aggregators; page
+metadata is identification only, never the authority. Verified end-to-end with
+the NDSS page (no DOI, no citation meta tags): title search → venue NDSS →
+CCF-A → PDF download. DBLP is currently behind an anti-bot challenge (Anubis);
+the backend degrades gracefully to OpenAlex.
+
 ## Development
 
 ```bash

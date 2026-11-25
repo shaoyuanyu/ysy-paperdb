@@ -684,15 +684,22 @@ If-Match: "3"            # 可选，乐观锁
 
 | 方法 | 路径 | Scope | 说明 |
 |---|---|---|---|
-| POST | `/v1/imports/identifiers` | W | `{items:[...], options?}` |
+| POST | `/v1/imports/identifiers` | W | `{items:[...], options?}`；item 可以是 DOI/arXiv/URL/标题（URL 会抓落地页提取标识符/标题/PDF 链接） |
 | POST | `/v1/imports/bibtex` | W | multipart `file` |
 | POST | `/v1/imports/pdf` | W | multipart `file` + 可选 `paperId` |
+| POST | `/v1/imports/pdf-url` | W | `{url, filename?}`：落地页或直链 PDF → 论文 + PDF；无可达 PDF 时仅导入元数据并带 warning |
 | GET | `/v1/imports` | R | 最近任务 |
 | GET | `/v1/imports/{id}` | R | 状态与统计 |
 | GET | `/v1/imports/{id}/items` | R | 逐条状态，分页 |
 | POST | `/v1/imports/{id}/items/{itemId}/retry` | W | 单条重试 |
 | POST | `/v1/imports/{id}/cancel` | W | |
 | GET | `/v1/jobs/{id}` | R | 通用 job 状态 |
+
+`resolve` 候选与 `POST /v1/imports/pdf-url` 的输入约定：任意论文落地页 URL（会议/期刊/仓库页）
+走 `ingest/page.py` 的提取阶梯——`citation_*` meta → og:title（剥站名后缀）→ `<title>`/H1 →
+正文 DOI/arXiv 正则与 `.pdf` 链接收割；页面元数据只作为识别桥与最后回退（`source="page"`，
+字段优先级最低），权威字段仍来自聚合源。候选新增 `pdfUrls` 字段（页面上发现的开放获取 PDF
+链接，按优先级排序）。
 
 `POST /v1/imports/identifiers` 请求：
 

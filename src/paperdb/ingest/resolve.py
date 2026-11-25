@@ -22,6 +22,7 @@ from paperdb.ingest.dblp_record import fetch_dblp_record
 from paperdb.ingest.http import build_client
 from paperdb.ingest.openalex import fetch_openalex, search_openalex
 from paperdb.ingest.openreview import fetch_openreview
+from paperdb.ingest.page import fetch_page
 from paperdb.ingest.s2 import fetch_s2
 from paperdb.ingest.types import AuthorRecord, Candidate, InputRef, SourceRecord
 from paperdb.ingest.venue_resolve import suggest_venue
@@ -33,14 +34,18 @@ _ARXIV_RE = re.compile(r"(?:arxiv[:\s]*)?(\d{4}\.\d{4,5})(v\d+)?", re.IGNORECASE
 _ACL_RE = re.compile(r"aclanthology\.org/([^/?#]+)", re.IGNORECASE)
 _OPENREVIEW_RE = re.compile(r"openreview\.net/forum\?id=([^&]+)", re.IGNORECASE)
 _DBLP_RE = re.compile(r"dblp\.org/rec/([^?#\s]+)", re.IGNORECASE)
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+\.\S+", re.IGNORECASE)
 
+# "page" is always the last resort: landing-page metadata only fills fields
+# the aggregator sources could not provide.
 _SOURCE_ORDER = {
-    "doi": ["crossref", "openalex", "dblp", "s2", "arxiv"],
-    "arxiv": ["arxiv", "s2", "crossref", "dblp", "openalex"],
-    "title": ["dblp", "crossref", "openalex", "s2", "arxiv"],
-    "acl": ["acl", "dblp", "crossref", "openalex", "s2"],
-    "openreview": ["openreview", "dblp", "crossref", "openalex", "s2"],
-    "dblp": ["dblp", "crossref", "openalex", "s2"],
+    "doi": ["crossref", "openalex", "dblp", "s2", "arxiv", "page"],
+    "arxiv": ["arxiv", "s2", "crossref", "dblp", "openalex", "page"],
+    "title": ["dblp", "crossref", "openalex", "s2", "arxiv", "page"],
+    "acl": ["acl", "dblp", "crossref", "openalex", "s2", "page"],
+    "openreview": ["openreview", "dblp", "crossref", "openalex", "s2", "page"],
+    "dblp": ["dblp", "crossref", "openalex", "s2", "page"],
+    "url": ["dblp", "crossref", "openalex", "s2", "arxiv", "acl", "openreview", "page"],
 }
 
 
@@ -65,6 +70,12 @@ def identify_input(raw: str) -> InputRef:
             kind="dblp",
             value=dblp.group(1).removesuffix(".html").removesuffix(".xml"),
         )
+    if _URL_RE.match(value):
+        # A generic landing page (venue site, publisher page, repository).
+        # The specific academic URLs above matched first; anything left is
+        # fetched and mined for identifiers/title by the url branch.
+        url = value if value.startswith(("http://", "https://")) else f"https://{value}"
+        return InputRef(raw=raw, kind="url", value=url)
     return InputRef(raw=raw, kind="title", value=value)
 
 
@@ -195,11 +206,63 @@ async def _evaluate(session: AsyncSession, venue_id: str | None, year: int) -> d
     return resolve_evaluation(venue, ranks, year)
 
 
+def _page_record(page) -> SourceRecord | None:
+    """Build a last-resort SourceRecord from the landing page itself."""
+    if not page.title:
+        return None
+    authors = []
+    for name in page.authors:
+        parts = name.split()
+        authors.append(
+            AuthorRecord(
+                name=name,
+                family=parts[-1] if len(parts) > 1 else None,
+                given=" ".join(parts[:-1]) if len(parts) > 1 else None,
+            )
+        )
+    return SourceRecord(
+        source="page",
+        title=page.title,
+        abstract=page.abstract,
+        year=page.year,
+        kind=None,
+        venue=page.venue_hint,
+        doi=page.doi,
+        arxiv=page.arxiv,
+        url=page.url,
+        authors=authors,
+        raw={"pdf_urls": page.pdf_urls, "venue_hint": page.venue_hint, "page_url": page.url},
+    )
+
+
 async def _collect(
     ref: InputRef,
     client: httpx.AsyncClient,
     settings: Settings,
-) -> list[SourceRecord]:
+) -> tuple[list[SourceRecord], str]:
+    """Gather SourceRecords for an input. Returns records plus the effective
+    input kind used for field-priority ordering (URL inputs delegate to the
+    identifier/title branch and inherit its ordering)."""
+    if ref.kind == "url":
+        page = await fetch_page(client, ref.value, settings)
+        if page is None:
+            return [], "url"
+        sub: InputRef
+        if page.doi:
+            sub = InputRef(raw=ref.raw, kind="doi", value=page.doi)
+        elif page.arxiv:
+            sub = InputRef(raw=ref.raw, kind="arxiv", value=page.arxiv)
+        elif page.title:
+            sub = InputRef(raw=ref.raw, kind="title", value=page.title)
+        else:
+            page_record = _page_record(page)
+            return ([page_record] if page_record else []), "url"
+        records, effective = await _collect(sub, client, settings)
+        page_record = _page_record(page)
+        if page_record is not None:
+            records.append(page_record)
+        return records, effective
+
     if ref.kind == "doi":
         records = await asyncio.gather(
             fetch_crossref(client, ref.value, settings),
@@ -227,7 +290,7 @@ async def _collect(
                 found.extend(result)
             elif isinstance(result, SourceRecord):
                 found.append(result)
-        return found
+        return found, "title"
     elif ref.kind == "acl":
         record = await fetch_acl(client, ref.value, settings)
         found = [record] if record else []
@@ -238,7 +301,7 @@ async def _collect(
         record = await fetch_dblp_record(client, ref.value, settings)
         found = [record] if record else []
     else:
-        return []
+        return [], ref.kind
 
     # DBLP is the best venue/author-identity source. Enrich DOI/arXiv/ACL/
     # OpenReview lookups with a title search after the primary record is known.
@@ -248,7 +311,7 @@ async def _collect(
         for record in dblp:
             if record.title and _similar(record.title, title):
                 found.append(record)
-    return found
+    return found, ref.kind
 
 
 def _candidate(records: list[SourceRecord], input_kind: str, raw: str) -> Candidate | None:
@@ -259,6 +322,7 @@ def _candidate(records: list[SourceRecord], input_kind: str, raw: str) -> Candid
     if not title:
         return None
     kind = _pick(records, "kind", order)
+    kind_from_source = kind is not None
     arxiv = _pick(records, "arxiv", order)
     if kind is None:
         kind = "preprint" if arxiv else "journal"
@@ -268,10 +332,12 @@ def _candidate(records: list[SourceRecord], input_kind: str, raw: str) -> Candid
     authors = _merge_authors(records, order)
     identifiers = _identifiers(records)
     venue_name = _pick(
-        records, "venue", ["dblp", "crossref", "acl", "openreview", "openalex", "s2"]
+        records, "venue", ["dblp", "crossref", "acl", "openreview", "openalex", "s2", "page"]
     )
     dblp_venue_key = _pick(records, "dblp_venue_key", order)
     edition_key = _pick(records, "dblp_edition_key", order)
+    page_record = next((record for record in records if record.source == "page"), None)
+    pdf_urls = list((page_record.raw or {}).get("pdf_urls") or []) if page_record else []
     return Candidate(
         confidence=0.0,
         sources=list(dict.fromkeys(record.source for record in records)),
@@ -288,9 +354,11 @@ def _candidate(records: list[SourceRecord], input_kind: str, raw: str) -> Candid
         venue=None,
         evaluation={"ccf": None, "cas": None},
         warnings=[],
+        pdf_urls=pdf_urls,
         _venue_name=venue_name,
         _dblp_venue_key=dblp_venue_key,
         _edition_key=edition_key,
+        _kind_from_source=kind_from_source,
     )
 
 
@@ -306,13 +374,16 @@ async def resolve_input(
     owns_client = client is None
     client = client or build_client(settings)
     try:
-        records = await _collect(ref, client, settings)
+        records, effective_kind = await _collect(ref, client, settings)
     finally:
         if owns_client:
             await client.aclose()
-    candidate = _candidate(records, ref.kind, raw)
+    candidate = _candidate(records, effective_kind, raw)
     if candidate is None:
-        warnings.append("no metadata source returned a record")
+        if ref.kind == "url":
+            warnings.append("landing page unreachable or no title found")
+        else:
+            warnings.append("no metadata source returned a record")
         return None, warnings
 
     venue_name = candidate._venue_name
@@ -330,6 +401,11 @@ async def resolve_input(
         candidate.evaluation = await _evaluate(session, candidate.venue.venue_id, candidate.year)
         if candidate.venue.venue_id is None:
             warnings.append("venue not in library; provisional venue will be created on import")
+        elif not candidate._kind_from_source and candidate.venue.kind in {"conference", "journal"}:
+            # kind was a blind default ("journal"); a matched in-library venue
+            # states the real kind. Without this, journal-kind + conference
+            # venue would later collide with the edition validation.
+            candidate.kind = candidate.venue.kind
     elif candidate.kind in {"conference", "journal"}:
         warnings.append("venue missing from all sources")
     if candidate.abstract is None:

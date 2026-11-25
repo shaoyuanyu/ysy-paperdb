@@ -46,7 +46,7 @@ class SourceRecord:
 @dataclass(slots=True)
 class InputRef:
     raw: str
-    kind: str  # doi | arxiv | acl | openreview | dblp | title
+    kind: str  # doi | arxiv | acl | openreview | dblp | url | title
     value: str
 
 
@@ -82,7 +82,14 @@ class Candidate:
     duplicate_of: dict[str, str] | None = None
     warnings: list[str] = field(default_factory=list)
     citekey: str | None = None
+    # Open-access PDF links discovered on the landing page (or elsewhere),
+    # ordered by preference. Empty when none were found.
+    pdf_urls: list[str] = field(default_factory=list)
     # Internal fields used while building/importing the candidate.
     _venue_name: str | None = None
     _dblp_venue_key: str | None = None
     _edition_key: str | None = None
+    # False when `kind` came from the blind default ("preprint"/"journal")
+    # rather than an explicit source statement; the matched venue may then
+    # override it (see resolve_input).
+    _kind_from_source: bool = False

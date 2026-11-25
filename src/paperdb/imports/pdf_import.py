@@ -5,7 +5,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
+from urllib.parse import urlsplit
 
+import httpx
 import pymupdf
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +16,7 @@ from paperdb.config import Settings
 from paperdb.db.models import Paper
 from paperdb.errors import ApiError
 from paperdb.imports.service import _paper_payload
+from paperdb.ingest.http import build_client
 from paperdb.ingest.resolve import resolve_input
 from paperdb.ingest.types import AuthorRecord, Candidate
 from paperdb.ingest.venue_resolve import ensure_venue
@@ -116,11 +119,74 @@ def inspect_pdf(data: bytes, filename: str | None = None) -> PdfMetadata:
 @dataclass(slots=True)
 class PdfImportResult:
     paper: Paper
-    file_id: uuid.UUID
+    file_id: uuid.UUID | None
     job_id: uuid.UUID | None
     created: bool
     title: str
     warnings: list[str]
+
+
+def _candidate_doi(candidate: Candidate) -> str | None:
+    for identifier in candidate.identifiers:
+        if identifier["scheme"] == "doi":
+            return str(identifier["value"])
+    return None
+
+
+async def _paper_for_candidate(
+    session: AsyncSession,
+    candidate: Candidate,
+    *,
+    title_match_doi: str | None,
+) -> tuple[Paper, bool]:
+    """Create (or link) the Paper for a resolved candidate.
+
+    Mirrors the upload flow: identifier duplicate first, then a
+    normalized-title match only when a DOI corroborates it, else create.
+    """
+    duplicate_id = candidate.duplicate_of.get("paperId") if candidate.duplicate_of else None
+    if duplicate_id:
+        existing = await session.get(Paper, uuid.UUID(duplicate_id))
+        if existing is None or existing.deleted_at is not None:
+            duplicate_id = None
+    if duplicate_id:
+        return existing, False  # type: ignore[return-value]
+
+    existing_by_title = await session.scalar(
+        select(Paper).where(
+            Paper.title_normalized == normalize_title(candidate.title),
+            Paper.deleted_at.is_(None),
+        )
+    )
+    if existing_by_title is not None and title_match_doi:
+        return existing_by_title, False
+
+    venue = None
+    edition = None
+    if candidate.venue is not None:
+        venue, edition = await ensure_venue(
+            session,
+            candidate.venue,
+            raw_name=candidate._venue_name,
+            kind=candidate.kind,
+            year=candidate.year,
+            dblp_venue_key=candidate._dblp_venue_key,
+            edition_dblp_key=candidate._edition_key,
+        )
+    try:
+        paper = await create_paper(
+            session,
+            _paper_payload(candidate, venue.id if venue else None, edition.id if edition else None),
+        )
+    except ApiError as exc:
+        if exc.code != "citekey_conflict" or not candidate.citekey:
+            raise
+        candidate.citekey = None
+        paper = await create_paper(
+            session,
+            _paper_payload(candidate, venue.id if venue else None, edition.id if edition else None),
+        )
+    return paper, True
 
 
 def _fallback_candidate(meta: PdfMetadata, warnings: list[str]) -> Candidate:
@@ -197,60 +263,9 @@ async def import_pdf(
         candidate = _fallback_candidate(meta, warnings)
         warnings.append("created from PDF metadata; external metadata not matched")
 
-    paper: Paper
-    duplicate_id = candidate.duplicate_of.get("paperId") if candidate.duplicate_of else None
-    if duplicate_id:
-        existing = await session.get(Paper, uuid.UUID(duplicate_id))
-        if existing is None or existing.deleted_at is not None:
-            duplicate_id = None
-    if duplicate_id:
-        paper = existing  # type: ignore[assignment]
-        created = False
-    else:
-        existing_by_title = await session.scalar(
-            select(Paper).where(
-                Paper.title_normalized == normalize_title(candidate.title),
-                Paper.deleted_at.is_(None),
-            )
-        )
-        if existing_by_title is not None and meta.doi:
-            paper = existing_by_title
-            created = False
-        else:
-            venue = None
-            edition = None
-            if candidate.venue is not None:
-                venue, edition = await ensure_venue(
-                    session,
-                    candidate.venue,
-                    raw_name=candidate._venue_name,
-                    kind=candidate.kind,
-                    year=candidate.year,
-                    dblp_venue_key=candidate._dblp_venue_key,
-                    edition_dblp_key=candidate._edition_key,
-                )
-            try:
-                paper = await create_paper(
-                    session,
-                    _paper_payload(
-                        candidate,
-                        venue.id if venue else None,
-                        edition.id if edition else None,
-                    ),
-                )
-            except ApiError as exc:
-                if exc.code != "citekey_conflict" or not candidate.citekey:
-                    raise
-                candidate.citekey = None
-                paper = await create_paper(
-                    session,
-                    _paper_payload(
-                        candidate,
-                        venue.id if venue else None,
-                        edition.id if edition else None,
-                    ),
-                )
-            created = True
+    paper, created = await _paper_for_candidate(
+        session, candidate, title_match_doi=meta.doi
+    )
     file, job_id = await create_file(
         session,
         paper=paper,
@@ -267,3 +282,125 @@ async def import_pdf(
         title=paper.title,
         warnings=list(dict.fromkeys(warnings)),
     )
+
+
+async def _fetch_bytes(
+    client: httpx.AsyncClient, url: str, settings: Settings
+) -> bytes | None:
+    """GET a URL and return its bytes when it looks like a usable download."""
+    try:
+        response = await client.get(url)
+    except httpx.HTTPError:
+        return None
+    if response.status_code >= 400 or len(response.content) > settings.max_upload_mb * 1024 * 1024:
+        return None
+    return response.content
+
+
+def _filename_from_url(url: str, fallback: str) -> str:
+    path = urlsplit(url).path
+    base = path.rsplit("/", 1)[-1]
+    if base and "." in base:
+        return base[:200]
+    return fallback
+
+
+async def import_pdf_from_url(
+    session: AsyncSession,
+    *,
+    url: str,
+    filename: str | None,
+    settings: Settings,
+) -> PdfImportResult:
+    """Import a paper (and its PDF) from a landing-page or direct-PDF URL.
+
+    Order of operations:
+    1. resolve the paper via the landing page (citation meta / og tags / title
+       search through the aggregator sources);
+    2. download the first working PDF link found on the page
+       (``citation_pdf_url`` and friends, exposed as ``candidate.pdf_urls``);
+    3. create/link the paper and store the file. When no PDF can be fetched,
+       the paper is still imported (metadata-only) with a warning.
+    """
+    if not url.startswith(("http://", "https://")):
+        raise ApiError(422, "invalid_url", "Only http(s) URLs are supported")
+
+    warnings: list[str] = []
+    owns_client = True
+    client = build_client(settings)
+    try:
+        candidate, resolve_warnings = await resolve_input(
+            session, url, settings, client=client
+        )
+        warnings.extend(resolve_warnings)
+
+        data: bytes | None = None
+        source_url: str | None = None
+        if candidate is not None:
+            for pdf_url in candidate.pdf_urls[:3]:
+                fetched = await _fetch_bytes(client, pdf_url, settings)
+                if fetched and fetched.startswith(b"%PDF-"):
+                    data = fetched
+                    source_url = pdf_url
+                    break
+
+        if data is None:
+            # Maybe the URL itself is a direct PDF link (or resolves to one).
+            fetched = await _fetch_bytes(client, url, settings)
+            if fetched and fetched.startswith(b"%PDF-"):
+                if candidate is None:
+                    # Direct PDF with no metadata: reuse the upload pipeline,
+                    # which extracts identifiers from the first page.
+                    return await import_pdf(
+                        session,
+                        data=fetched,
+                        filename=filename
+                        or _filename_from_url(url, "downloaded.pdf"),
+                        settings=settings,
+                    )
+                data = fetched
+                source_url = url
+
+        if candidate is None:
+            raise ApiError(
+                422,
+                "resolve_failed",
+                "; ".join(warnings) or "landing page gave no usable paper metadata",
+            )
+
+        paper, created = await _paper_for_candidate(
+            session, candidate, title_match_doi=_candidate_doi(candidate)
+        )
+
+        if data is None:
+            warnings.append("no PDF link found on page; imported metadata only")
+            await session.flush()
+            return PdfImportResult(
+                paper=paper,
+                file_id=None,
+                job_id=None,
+                created=created,
+                title=paper.title,
+                warnings=list(dict.fromkeys(warnings)),
+            )
+
+        file, job_id = await create_file(
+            session,
+            paper=paper,
+            data=data,
+            filename=filename
+            or _filename_from_url(source_url or url, f"{paper.citekey or 'paper'}.pdf"),
+            settings=settings,
+        )
+        await session.flush()
+        return PdfImportResult(
+            paper=paper,
+            file_id=file.id,
+            job_id=job_id,
+            created=created,
+            title=paper.title,
+            warnings=list(dict.fromkeys(warnings)),
+        )
+    finally:
+        if owns_client:
+            await client.aclose()

@@ -375,3 +375,173 @@ async def test_suggest_acl_proceedings_venue() -> None:
     assert suggestion.venue_id is not None
     assert suggestion.abbrev == "ACL"
     assert suggestion.evidence == "proceedings"
+
+
+async def test_suggest_icml_proceedings_venue() -> None:
+    from paperdb.ingest.venue_resolve import suggest_venue
+
+    async with get_sessionmaker()() as session:
+        suggestion = await suggest_venue(
+            session,
+            raw_name="Proceedings of the 41st International Conference on Machine Learning",
+            kind="conference",
+            year=2024,
+        )
+    assert suggestion is not None
+    assert suggestion.venue_id is not None
+    assert suggestion.abbrev == "ICML"
+    assert suggestion.evidence == "proceedings"
+
+
+_NDSS_TITLE = (
+    "Bleeding Pathways: Vanishing Discriminability in LLM Hidden States Fuels Jailbreak Attacks"
+)
+_NDSS_PAGE = f"""<!DOCTYPE html>
+<html><head>
+<meta property="og:title" content="{_NDSS_TITLE} - NDSS Symposium" />
+<meta property="og:site_name" content="NDSS Symposium" />
+<title>{_NDSS_TITLE} - NDSS Symposium</title>
+</head><body>
+<h1>{_NDSS_TITLE}</h1>
+<a href="https://www.ndss-symposium.org/wp-content/uploads/2026-f4-paper.pdf">Paper</a>
+</body></html>"""
+
+_NDSS_OPENALEX = {
+    "results": [
+        {
+            "title": _NDSS_TITLE,
+            "publication_year": 2026,
+            "type": "proceedings-article",
+            "doi": "https://doi.org/10.14722/ndss.2026.240004",
+            "ids": {"openalex": "W1"},
+            "id": "https://openalex.org/W1",
+            "primary_location": {
+                "source": {"display_name": "Network and Distributed System Security Symposium"}
+            },
+            "authorships": [{"author": {"display_name": "Yingjie Zhang"}}],
+        }
+    ]
+}
+
+
+def _landing_handler(
+    page_html: str, *, openalex: dict[str, Any] | None = None
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "ndss-symposium.org" in url and url.endswith(".pdf"):
+            return httpx.Response(200, content=b"fake")
+        if "ndss-symposium.org" in url:
+            return httpx.Response(200, text=page_html)
+        if "dblp.org/search" in url:
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        if "openalex.org" in url:
+            return httpx.Response(200, json=openalex or {"results": []})
+        if "semanticscholar.org" in url:
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_resolve_landing_page_url() -> None:
+    transport = _landing_handler(_NDSS_PAGE, openalex=_NDSS_OPENALEX)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="https://mock") as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session,
+            "https://www.ndss-symposium.org/ndss-paper/bleeding-pathways-vanishing-discriminability/",
+            get_settings(),
+            client=client,
+        )
+    assert candidate is not None, warnings
+    assert candidate.title.startswith("Bleeding Pathways")
+    assert "page" in candidate.sources
+    assert "openalex" in candidate.sources
+    assert candidate.venue is not None
+    assert candidate.venue.abbrev == "NDSS"
+    assert candidate.venue.venue_id is not None
+    assert candidate.evaluation["ccf"] is not None
+    assert candidate.pdf_urls == [
+        "https://www.ndss-symposium.org/wp-content/uploads/2026-f4-paper.pdf"
+    ]
+    assert any(item["scheme"] == "doi" for item in candidate.identifiers)
+
+
+async def test_resolve_landing_page_with_citation_doi() -> None:
+    page = """<!DOCTYPE html>
+<html><head>
+<meta name="citation_title" content="A Publisher Paper About Retrieval" />
+<meta name="citation_doi" content="10.9999/landing-doi" />
+<meta name="citation_pdf_url" content="https://publisher.org/pdf/landing-doi.pdf" />
+</head><body></body></html>"""
+    doi = "10.9999/landing-doi"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "publisher.org" in url:
+            return httpx.Response(200, text=page)
+        if "crossref.org" in url:
+            return httpx.Response(200, json=_crossref(doi, "A Publisher Paper About Retrieval"))
+        if "dblp.org/search" in url:
+            return httpx.Response(200, json={"result": {"hits": {"hit": []}}})
+        if "openalex.org" in url:
+            return httpx.Response(200, json={"results": []})
+        if "semanticscholar.org" in url:
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session, "https://publisher.org/content/paper-123", get_settings(), client=client
+        )
+    assert candidate is not None, warnings
+    assert "crossref" in candidate.sources
+    assert "page" in candidate.sources
+    assert candidate.identifiers[0]["scheme"] == "doi"
+    assert candidate.pdf_urls == ["https://publisher.org/pdf/landing-doi.pdf"]
+
+
+async def test_resolve_landing_page_unindexed_fallback() -> None:
+    """Fresh accepted papers missing from every aggregator are still built
+    from the landing page itself (title/venue-hint/pdf link)."""
+    transport = _landing_handler(_NDSS_PAGE)
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="https://mock") as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session,
+            "https://www.ndss-symposium.org/ndss-paper/bleeding-pathways-vanishing-discriminability/",
+            get_settings(),
+            client=client,
+        )
+    assert candidate is not None, warnings
+    assert candidate.sources == ["page"]
+    assert candidate.title.startswith("Bleeding Pathways")
+    assert candidate.pdf_urls
+    # Venue hint "NDSS Symposium" matches NDSS through the acronym branch
+    # despite the page-only kind defaulting to journal.
+    assert candidate.venue is not None
+    assert candidate.venue.abbrev == "NDSS"
+    assert candidate.venue.evidence == "acronym"
+
+
+async def test_resolve_unreachable_landing_page() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client,
+        get_sessionmaker()() as session,
+    ):
+        candidate, warnings = await resolve_input(
+            session, "https://unreachable.example.org/paper/1", get_settings(), client=client
+        )
+    assert candidate is None
+    assert any("unreachable" in warning for warning in warnings)

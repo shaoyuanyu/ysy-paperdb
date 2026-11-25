@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -43,6 +44,8 @@ from paperdb.papers.bibtex_import import (
 )
 from paperdb.papers.service import create_paper
 
+_BIBTEX_ENTRY_RE = re.compile(r"^\s*@[A-Za-z]+\s*[{(]")
+
 
 def _stats(items: list[ImportItem]) -> dict[str, int]:
     return {
@@ -61,6 +64,15 @@ async def create_import_job(
     *,
     token_id: str | None = None,
 ) -> tuple[ImportJob, uuid.UUID]:
+    # A pasted BibTeX entry sent through the identifiers endpoint would be split
+    # by the client into one item per line and resolve random lines as titles.
+    # Reject it here even if a third-party client bypasses the web UI.
+    if any(_BIBTEX_ENTRY_RE.match(item) for item in payload.items):
+        raise ApiError(
+            422,
+            "bibtex_in_identifiers",
+            "This looks like BibTeX. Use the BibTeX import endpoint/file instead.",
+        )
     import_job = ImportJob(
         id=uuid.uuid4(),
         kind=ImportKind.identifiers,

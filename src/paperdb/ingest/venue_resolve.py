@@ -18,6 +18,48 @@ from paperdb.ingest.types import VenueSuggestion
 from paperdb.venues.normalize import normalize_name
 
 
+async def _by_abbrev(
+    session: AsyncSession, abbrev: str, venue_kind: VenueKind | None
+) -> Venue | None:
+    stmt = select(Venue).where(
+        func.lower(Venue.abbrev) == abbrev.lower(),
+        Venue.merged_into_id.is_(None),
+    )
+    if venue_kind is not None:
+        stmt = stmt.where(Venue.kind == venue_kind)
+    venue = await session.scalar(stmt.limit(1))
+    # The kind carried by metadata sources is often missing or wrong (e.g.
+    # landing-page candidates default to "journal"); a unique abbrev match
+    # should not be discarded just because the kind disagrees.
+    if venue is None and venue_kind is not None:
+        venue = await session.scalar(
+            select(Venue)
+            .where(
+                func.lower(Venue.abbrev) == abbrev.lower(),
+                Venue.merged_into_id.is_(None),
+            )
+            .limit(1)
+        )
+    return venue
+
+
+async def _by_normalized_name(
+    session: AsyncSession, normalized: str, venue_kind: VenueKind | None
+) -> Venue | None:
+    stmt = select(Venue).where(Venue.normalized_name == normalized)
+    if venue_kind is not None:
+        stmt = stmt.where(Venue.kind == venue_kind)
+    venue = await session.scalar(stmt.limit(1))
+    if venue is None and venue_kind is not None:
+        venue = await session.scalar(
+            select(Venue).where(
+                Venue.normalized_name == normalized,
+                Venue.merged_into_id.is_(None),
+            ).limit(1)
+        )
+    return venue
+
+
 async def suggest_venue(
     session: AsyncSession,
     *,
@@ -64,6 +106,7 @@ async def suggest_venue(
                     "EACL",
                 ),
                 ("association for computational linguistics", "ACL"),
+                ("international conference on machine learning", "ICML"),
                 ("empirical methods in natural language processing", "EMNLP"),
                 ("international conference on computational linguistics", "COLING"),
                 ("transactions of the association for computational linguistics", "TACL"),
@@ -71,23 +114,14 @@ async def suggest_venue(
             for needle, abbrev in proceedings_hints:
                 if needle not in lower_name:
                     continue
-                stmt = select(Venue).where(
-                    func.lower(Venue.abbrev) == abbrev.lower(),
-                    Venue.merged_into_id.is_(None),
-                )
-                if venue_kind is not None:
-                    stmt = stmt.where(Venue.kind == venue_kind)
-                venue = await session.scalar(stmt.limit(1))
+                venue = await _by_abbrev(session, abbrev, venue_kind)
                 if venue is not None:
                     evidence = "proceedings"
                 break
 
     if venue is None and raw_name:
         normalized = normalize_name(raw_name)
-        stmt = select(Venue).where(Venue.normalized_name == normalized)
-        if venue_kind is not None:
-            stmt = stmt.where(Venue.kind == venue_kind)
-        venue = await session.scalar(stmt.limit(1))
+        venue = await _by_normalized_name(session, normalized, venue_kind)
         if venue is not None:
             evidence = "name"
         else:
@@ -101,6 +135,7 @@ async def suggest_venue(
     if venue is None and raw_name:
         # Proceedings titles often use an acronym ("Proceedings of the 2024 CHI
         # Conference ..."), while CCF stores the full name under a short abbrev.
+        # Landing pages contribute venue hints like "NDSS Symposium".
         acronyms = {
             word.lower()
             for word in re.findall(r"[A-Z][A-Za-z0-9&+-]{2,}", raw_name)
@@ -114,6 +149,19 @@ async def suggest_venue(
             if venue_kind is not None:
                 stmt = stmt.where(Venue.kind == venue_kind)
             matches = list((await session.scalars(stmt.limit(10))).all())
+            if not matches and venue_kind is not None:
+                matches = list(
+                    (
+                        await session.scalars(
+                            select(Venue)
+                            .where(
+                                Venue.merged_into_id.is_(None),
+                                func.lower(Venue.abbrev).in_(acronyms),
+                            )
+                            .limit(10)
+                        )
+                    ).all()
+                )
             tokens = set(normalize_name(raw_name).split())
             scored = [
                 (len(tokens & set(normalize_name(item.full_name).split())), item)

@@ -60,9 +60,15 @@ def _record(work: dict[str, Any]) -> SourceRecord | None:
     work_type = str(work.get("type") or "")
     kind = {
         "preprint": "preprint",
+        "article-journal": "journal",
         "journal-article": "journal",
-        "proceedings-article": "conference",
         "article": "journal",
+        "proceedings-article": "conference",
+        "conference-paper": "conference",
+        "proceedings": "conference",
+        "book-chapter": "book_chapter",
+        "report": "tech_report",
+        "dissertation": "thesis",
     }.get(work_type)
     publication_date = work.get("publication_date")
     parsed_date = None
