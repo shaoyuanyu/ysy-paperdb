@@ -356,3 +356,22 @@ async def test_resolve_dblp_record() -> None:
     assert candidate.venue is not None
     assert candidate.venue.venue_id is not None
     assert candidate.evaluation["ccf"]["level"] == "A"
+
+
+async def test_suggest_acl_proceedings_venue() -> None:
+    from paperdb.ingest.venue_resolve import suggest_venue
+
+    async with get_sessionmaker()() as session:
+        suggestion = await suggest_venue(
+            session,
+            raw_name=(
+                "Proceedings of the 62nd Annual Meeting of the Association for "
+                "Computational Linguistics (Volume 1: Long Papers)"
+            ),
+            kind="conference",
+            year=2024,
+        )
+    assert suggestion is not None
+    assert suggestion.venue_id is not None
+    assert suggestion.abbrev == "ACL"
+    assert suggestion.evidence == "proceedings"

@@ -64,6 +64,41 @@ async def suggest_venue(
                 evidence = "alias"
 
     if venue is None and raw_name:
+        # ACL Anthology / Crossref proceedings titles often spell the venue out
+        # ("Proceedings of the 62nd Annual Meeting of the Association for
+        # Computational Linguistics") without the acronym used by CCF. Map the
+        # common NLP families before the exact/alias lookup fails.
+        lower_name = raw_name.lower()
+        if "findings of the" not in lower_name:
+            proceedings_hints = (
+                (
+                    "north american chapter of the association for computational linguistics",
+                    "NAACL",
+                ),
+                (
+                    "european chapter of the association for computational linguistics",
+                    "EACL",
+                ),
+                ("association for computational linguistics", "ACL"),
+                ("empirical methods in natural language processing", "EMNLP"),
+                ("international conference on computational linguistics", "COLING"),
+                ("transactions of the association for computational linguistics", "TACL"),
+            )
+            for needle, abbrev in proceedings_hints:
+                if needle not in lower_name:
+                    continue
+                stmt = select(Venue).where(
+                    func.lower(Venue.abbrev) == abbrev.lower(),
+                    Venue.merged_into_id.is_(None),
+                )
+                if venue_kind is not None:
+                    stmt = stmt.where(Venue.kind == venue_kind)
+                venue = await session.scalar(stmt.limit(1))
+                if venue is not None:
+                    evidence = "proceedings"
+                break
+
+    if venue is None and raw_name:
         # Proceedings titles often use an acronym ("Proceedings of the 2024 CHI
         # Conference ..."), while CCF stores the full name under a short abbrev.
         acronyms = {
