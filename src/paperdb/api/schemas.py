@@ -889,3 +889,12 @@ class CitationSyncRequest(ApiModel):
 class CitationSyncCreated(ApiModel):
     job_id: uuid.UUID
     papers: int
+
+
+class PdfImportCreated(ApiModel):
+    paper_id: uuid.UUID
+    file_id: uuid.UUID
+    job_id: uuid.UUID | None = None
+    created: bool
+    title: str
+    warnings: list[str] = Field(default_factory=list)
