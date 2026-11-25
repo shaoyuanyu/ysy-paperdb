@@ -48,22 +48,6 @@ async def suggest_venue(
             evidence = "dblp"
 
     if venue is None and raw_name:
-        normalized = normalize_name(raw_name)
-        stmt = select(Venue).where(Venue.normalized_name == normalized)
-        if venue_kind is not None:
-            stmt = stmt.where(Venue.kind == venue_kind)
-        venue = await session.scalar(stmt.limit(1))
-        if venue is not None:
-            evidence = "name"
-        else:
-            alias = await session.scalar(
-                select(VenueAlias).where(VenueAlias.normalized_alias == normalized).limit(1)
-            )
-            if alias is not None:
-                venue = await session.get(Venue, alias.venue_id)
-                evidence = "alias"
-
-    if venue is None and raw_name:
         # ACL Anthology / Crossref proceedings titles often spell the venue out
         # ("Proceedings of the 62nd Annual Meeting of the Association for
         # Computational Linguistics") without the acronym used by CCF. Map the
@@ -97,6 +81,22 @@ async def suggest_venue(
                 if venue is not None:
                     evidence = "proceedings"
                 break
+
+    if venue is None and raw_name:
+        normalized = normalize_name(raw_name)
+        stmt = select(Venue).where(Venue.normalized_name == normalized)
+        if venue_kind is not None:
+            stmt = stmt.where(Venue.kind == venue_kind)
+        venue = await session.scalar(stmt.limit(1))
+        if venue is not None:
+            evidence = "name"
+        else:
+            alias = await session.scalar(
+                select(VenueAlias).where(VenueAlias.normalized_alias == normalized).limit(1)
+            )
+            if alias is not None:
+                venue = await session.get(Venue, alias.venue_id)
+                evidence = "alias"
 
     if venue is None and raw_name:
         # Proceedings titles often use an acronym ("Proceedings of the 2024 CHI
