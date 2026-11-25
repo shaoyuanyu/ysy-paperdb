@@ -22,9 +22,16 @@ RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" "uv>=0.5,<1" \
     && useradd --system --uid 10001 --gid paperdb --home-dir /app paperdb
 
 COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
 RUN UV_INDEX_URL="$UV_INDEX_URL" uv sync --frozen --no-dev \
-    && chown -R paperdb:paperdb /app
+    && chown -R paperdb:paperdb /app/.venv
+# src is copied *after* the dependency sync so source-only deploys reuse the
+# dependency layer. The first sync installs an empty project wheel (src is
+# absent); the second sync below reinstalls the project from real source.
+# It is network-free and completes in milliseconds.
+COPY --chown=paperdb:paperdb src ./src
+RUN chmod 644 /app/pyproject.toml /app/uv.lock /app/README.md \
+    && UV_INDEX_URL="$UV_INDEX_URL" uv sync --frozen --no-dev \
+    && chown -R paperdb:paperdb /app/.venv
 
 COPY --chown=paperdb:paperdb alembic.ini ./
 COPY --chown=paperdb:paperdb alembic ./alembic
