@@ -30,6 +30,7 @@ def test_parse_bibtex() -> None:
     assert entry.value("title") == "Attention Is {All} You Need"
     candidate = entry_to_candidate(entry)
     assert candidate is not None
+    assert candidate.title == "Attention Is All You Need"
     assert candidate.kind == "conference"
     assert candidate.year == 2017
     assert candidate.authors[0].family == "Vaswani"
@@ -78,3 +79,19 @@ async def test_bibtex_import_upload_and_worker(client: httpx.AsyncClient) -> Non
     assert paper["venue"]["fullName"] == "Conference on Neural Information Processing Systems"
     job = (await client.get(f"/v1/jobs/{job_id}", headers=SERVICE)).json()
     assert job["status"] == "succeeded"
+
+
+async def test_bibtex_pasted_as_identifiers_is_rejected(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/v1/imports/identifiers",
+        headers=SERVICE,
+        json={
+            "items": [
+                "@InProceedings{pmlr-v235-greenblatt24a,",
+                "  title = {AI Control: Improving Safety Despite Intentional Subversion},",
+                "}",
+            ]
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "bibtex_in_identifiers"

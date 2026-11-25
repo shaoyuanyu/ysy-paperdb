@@ -179,6 +179,12 @@ def _clean_name(value: str) -> str:
     return value.replace("{", "").replace("}", "").strip()
 
 
+def _clean_title(value: str) -> str:
+    # BibTeX braces protect capitalization ("{AI} Control"); they are not part
+    # of the displayed title.
+    return _WS_RE.sub(" ", value.replace("{", "").replace("}", "")).strip()
+
+
 def parse_authors(value: str | None) -> list[AuthorRecord]:
     if not value:
         return []
@@ -205,7 +211,7 @@ def parse_authors(value: str | None) -> list[AuthorRecord]:
 
 
 def entry_to_candidate(entry: BibEntry) -> Candidate | None:
-    title = entry.value("title")
+    title = _clean_title(entry.value("title") or "")
     if not title:
         return None
     kind = _ENTRY_TYPES.get(entry.entry_type, "preprint")
