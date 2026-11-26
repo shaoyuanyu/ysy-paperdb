@@ -230,3 +230,37 @@ async def test_staged_paper_hidden_from_fulltext(
         )
     ).json()["hits"]
     assert any(hit["paperId"] == paper["id"] for hit in visible)
+
+
+async def test_personal_token_with_organize_write_can_use_workspaces(
+    client: httpx.AsyncClient,
+) -> None:
+    """A default personal token (organize:write, no organize:read) must work.
+
+    organize:read isn't part of the scope vocabulary, so reading endpoints must
+    accept organize:write — otherwise every personal token and the MCP server
+    get 403 on /v1/workspaces.
+    """
+    created = await client.post(
+        "/v1/tokens",
+        headers=SERVICE,
+        json={
+            "name": f"pytest-workspaces-{uuid.uuid4().hex[:8]}",
+            "scopes": ["papers:read", "papers:write", "organize:write"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    personal = {"Authorization": f"Bearer {created.json()['token']}"}
+
+    listed = await client.get("/v1/workspaces", headers=personal)
+    assert listed.status_code == 200, listed.text
+
+    workspace = await client.post(
+        "/v1/workspaces", headers=personal, json={"name": "Personal Scope Survey"}
+    )
+    assert workspace.status_code == 201, workspace.text
+    detail = await client.get(
+        f"/v1/workspaces/{workspace.json()['id']}", headers=personal
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["paperCount"] == 0

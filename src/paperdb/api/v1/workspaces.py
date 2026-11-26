@@ -70,7 +70,7 @@ async def _detail(
 @router.get("", response_model=ResearchWorkspacePage)
 async def list_endpoint(
     include_closed: bool = False,
-    principal: TokenPrincipal = Depends(scoped("organize:read")),
+    principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
 ) -> ResearchWorkspacePage:
     rows = await list_workspaces(session, include_closed=include_closed)
@@ -104,7 +104,7 @@ async def get_endpoint(
     workspace_id: uuid.UUID,
     pending_only: bool = False,
     limit: int = Query(default=200, ge=1, le=500),
-    principal: TokenPrincipal = Depends(scoped("organize:read")),
+    principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
 ) -> ResearchWorkspaceDetail:
     return await _detail(session, workspace_id, limit=limit, pending_only=pending_only)
@@ -130,7 +130,7 @@ async def papers_endpoint(
     workspace_id: uuid.UUID,
     pending_only: bool = False,
     limit: int = Query(default=200, ge=1, le=500),
-    principal: TokenPrincipal = Depends(scoped("organize:read")),
+    principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
 ) -> list[WorkspacePaperOut]:
     workspace = await get_workspace(session, workspace_id)
