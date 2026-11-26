@@ -701,6 +701,22 @@ If-Match: "3"            # 可选，乐观锁
 字段优先级最低），权威字段仍来自聚合源。候选新增 `pdfUrls` 字段（页面上发现的开放获取 PDF
 链接，按优先级排序）。
 
+### 5.14 破坏性操作的 TOTP 门控
+
+实体级删除与合并（`DELETE /v1/papers/{ref}`、`POST /v1/papers/{ref}/merge`、
+`DELETE /v1/files/{id}`、`DELETE /v1/collections/{id}`、`DELETE /v1/tags/{id}`、
+`DELETE /v1/views/{id}`、`DELETE /v1/projects/{id}`、`DELETE /v1/tokens/{id}`）对
+**个人令牌**（agent 路径）要求请求头 `X-TOTP-Code: <6 位验证码>`：
+
+- 验证参数与站点登录一致（RFC 6238，SHA1/6 位/30 秒，±1 步窗口）；密钥经
+  `PAPERDB_TOTP_SECRET` 注入（与站点 `TOTP_SECRET` 同值）。
+- **service token（Next 服务端代理）豁免**：其密钥只存在于服务端，不经手模型。
+- 密钥未配置时 fail-closed（503 `totp_not_configured`）；缺码 428 `totp_required`；
+  错误/过期 403 `totp_invalid`；连续 5 次失败锁定 15 分钟。
+- 关联级移除（`DELETE /papers/{ref}/tags`、`/collections`、项目成员）不设门：可重加，
+  无数据损失。
+- 论文/合集删除本身是软删（`deleted_at` + restore 端点），TOTP 是操作前的用户批准步骤。
+
 `POST /v1/imports/identifiers` 请求：
 
 ```json
