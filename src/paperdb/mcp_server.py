@@ -32,7 +32,11 @@ mcp = FastMCP(
         "Literature library tools (paperdb). Resolve is read-only and safe; "
         "imports write to the library and are deduplicated automatically. "
         "When unsure whether a query matches the intended paper, resolve "
-        "first and inspect the candidate (title/venue/authors/duplicateOf)."
+        "first and inspect the candidate (title/venue/authors/duplicateOf). "
+        "These tools also serve paper-lookup workflows: after presenting "
+        "search results to the user, offer to import some or all of them "
+        "(one request for identifier batches; parallel calls for paper-page "
+        "URLs)."
     ),
 )
 
