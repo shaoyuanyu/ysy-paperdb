@@ -46,9 +46,7 @@ mcp = FastMCP(
 
 def _client() -> httpx.AsyncClient:
     if not _TOKEN:
-        raise RuntimeError(
-            "PAPERDB_MCP_TOKEN is not set; configure the token for the paperdb API"
-        )
+        raise RuntimeError("PAPERDB_MCP_TOKEN is not set; configure the token for the paperdb API")
     return httpx.AsyncClient(
         base_url=_BASE_URL,
         headers={"Authorization": f"Bearer {_TOKEN}"},
@@ -108,9 +106,7 @@ def _brief_paper(paper: dict[str, Any]) -> dict[str, Any]:
     )
     brief = {key: paper.get(key) for key in keep if key in paper}
     if "venue" in paper and isinstance(paper["venue"], dict):
-        brief["venue"] = {
-            key: paper["venue"].get(key) for key in ("abbrev", "fullName", "ccf")
-        }
+        brief["venue"] = {key: paper["venue"].get(key) for key in ("abbrev", "fullName", "ccf")}
     return brief
 
 
@@ -202,9 +198,7 @@ async def import_paper(
     created = await _request(
         "POST", "/v1/imports/identifiers", json={"items": [query], "options": options}
     )
-    return json.dumps(
-        await _wait_for_import(created["importId"]), ensure_ascii=False
-    )
+    return json.dumps(await _wait_for_import(created["importId"]), ensure_ascii=False)
 
 
 @mcp.tool()
@@ -245,9 +239,7 @@ async def import_paper_with_pdf(
     return json.dumps(result, ensure_ascii=False)
 
 
-async def _apply_defaults(
-    paper_id: str, tags: list[str] | None, collection_id: str | None
-) -> None:
+async def _apply_defaults(paper_id: str, tags: list[str] | None, collection_id: str | None) -> None:
     if tags:
         await _request("POST", f"/v1/papers/{paper_id}/tags", json={"paths": tags})
     if collection_id:
@@ -425,9 +417,7 @@ async def list_workspaces(include_closed: bool = False) -> str:
     NOT in the library yet: they are hidden from list_papers/search until
     promoted. Use it for batch research the user may not keep.
     """
-    result = await _request(
-        "GET", "/v1/workspaces", params={"include_closed": include_closed}
-    )
+    result = await _request("GET", "/v1/workspaces", params={"include_closed": include_closed})
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -481,9 +471,7 @@ async def promote_workspace_papers(
     payload: dict[str, Any] = {"paperRefs": paper_refs}
     if collection_id:
         payload["collectionId"] = collection_id
-    result = await _request(
-        "POST", f"/v1/workspaces/{workspace_id}/promote", json=payload
-    )
+    result = await _request("POST", f"/v1/workspaces/{workspace_id}/promote", json=payload)
     return json.dumps(result, ensure_ascii=False)
 
 

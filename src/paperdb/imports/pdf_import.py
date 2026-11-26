@@ -55,9 +55,7 @@ def _clean(value: str | None) -> str:
 
 
 def _looks_like_running_header(text: str) -> bool:
-    return bool(
-        _RUNNING_HEADER_RE.match(text) or _PAGES_RE.search(text) or _SERIAL_RE.search(text)
-    )
+    return bool(_RUNNING_HEADER_RE.match(text) or _PAGES_RE.search(text) or _SERIAL_RE.search(text))
 
 
 def _plausible_title(text: str) -> bool:
@@ -94,9 +92,7 @@ def _title_from_page_layout(page: pymupdf.Page) -> str | None:
         )
         if not _plausible_title(text) or "@" in text:
             continue
-        size = max(
-            float(span.get("size", 0.0)) for line in lines for span in line.get("spans", [])
-        )
+        size = max(float(span.get("size", 0.0)) for line in lines for span in line.get("spans", []))
         layout.append((size, y0, y1, text))
     if not layout:
         return None
@@ -403,9 +399,7 @@ async def import_pdf(
     )
 
 
-async def _fetch_bytes(
-    client: httpx.AsyncClient, url: str, settings: Settings
-) -> bytes | None:
+async def _fetch_bytes(client: httpx.AsyncClient, url: str, settings: Settings) -> bytes | None:
     """GET a URL and return its bytes when it looks like a usable download."""
     try:
         response = await client.get(url)
@@ -461,9 +455,7 @@ async def import_pdf_from_url(
     owns_client = True
     client = build_client(settings)
     try:
-        candidate, resolve_warnings = await resolve_input(
-            session, url, settings, client=client
-        )
+        candidate, resolve_warnings = await resolve_input(session, url, settings, client=client)
         warnings.extend(resolve_warnings)
 
         data: bytes | None = None
@@ -486,8 +478,7 @@ async def import_pdf_from_url(
                     return await import_pdf(
                         session,
                         data=fetched,
-                        filename=filename
-                        or _filename_from_url(url, "downloaded.pdf"),
+                        filename=filename or _filename_from_url(url, "downloaded.pdf"),
                         settings=settings,
                     )
                 data = fetched

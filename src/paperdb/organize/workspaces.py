@@ -165,9 +165,10 @@ async def promote_papers(
         if membership is not None and membership.promoted_at is None:
             membership.promoted_at = now
         await _refresh_staged(session, paper)
-        if collection_id is not None and await session.get(
-            CollectionPaper, (collection_id, paper.id)
-        ) is None:
+        if (
+            collection_id is not None
+            and await session.get(CollectionPaper, (collection_id, paper.id)) is None
+        ):
             session.add(CollectionPaper(collection_id=collection_id, paper_id=paper.id))
         promoted.append(paper)
     await session.flush()
@@ -274,9 +275,7 @@ async def workspace_stats(
     return result
 
 
-async def list_workspaces(
-    session: AsyncSession, *, include_closed: bool = False
-) -> list[dict]:
+async def list_workspaces(session: AsyncSession, *, include_closed: bool = False) -> list[dict]:
     stmt = select(ResearchWorkspace).order_by(
         ResearchWorkspace.closed_at.is_not(None), ResearchWorkspace.created_at.desc()
     )

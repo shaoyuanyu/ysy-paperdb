@@ -733,9 +733,7 @@ async def test_import_fuzzy_autolink_and_identifier_merge(
     assert item["error"] and "identifier(s) merged" in item["error"]
     assert result["job"]["stats"]["duplicates"] == 1
 
-    paper = (
-        await client.get(f"/v1/papers/{result['existingId']}", headers=SERVICE)
-    ).json()
+    paper = (await client.get(f"/v1/papers/{result['existingId']}", headers=SERVICE)).json()
     schemes = {identifier["scheme"] for identifier in paper["identifiers"]}
     assert schemes == {"doi", "arxiv"}, paper["identifiers"]
     # default tags apply to linked entries too
@@ -761,9 +759,7 @@ async def test_import_on_duplicate_skip(
     result = await _fuzzy_import_case(client, monkeypatch, on_duplicate="skip")
     item = result["items"][0]
     assert item["status"] == "created", item
-    paper = (
-        await client.get(f"/v1/papers/{result['existingId']}", headers=SERVICE)
-    ).json()
+    paper = (await client.get(f"/v1/papers/{result['existingId']}", headers=SERVICE)).json()
     assert paper["identifiers"] == []
 
 
@@ -825,9 +821,7 @@ async def test_import_identifier_duplicate_merges_new_identifiers(
     assert items[0]["paperId"] == existing_id
 
     paper = (await client.get(f"/v1/papers/{existing_id}", headers=SERVICE)).json()
-    values = {
-        (identifier["scheme"], identifier["value"]) for identifier in paper["identifiers"]
-    }
+    values = {(identifier["scheme"], identifier["value"]) for identifier in paper["identifiers"]}
     assert ("arxiv", "2601.08888") in values
     assert ("doi", doi) in values
 
@@ -865,9 +859,7 @@ def test_candidate_prefers_real_venue_over_preprint() -> None:
 
     records = [
         SourceRecord(source="openalex", title="A Paper", year=2025, venue="arXiv"),
-        SourceRecord(
-            source="page", title="A Paper", year=2025, venue="USENIX Security Symposium"
-        ),
+        SourceRecord(source="page", title="A Paper", year=2025, venue="USENIX Security Symposium"),
     ]
     candidate = _candidate(records, "url", "https://www.usenix.org/conference/x")
     assert candidate is not None

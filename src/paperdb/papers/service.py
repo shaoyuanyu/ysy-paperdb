@@ -825,9 +825,7 @@ async def merge_papers(
     )
     target_file_keys = {(file.storage_backend, file.storage_key) for file in target_files}
     target_has_primary = any(file.is_primary for file in target_files)
-    for file in (
-        await session.scalars(select(PdfFile).where(PdfFile.paper_id == source.id))
-    ).all():
+    for file in (await session.scalars(select(PdfFile).where(PdfFile.paper_id == source.id))).all():
         if file.deleted_at is not None:
             continue
         key = (file.storage_backend, file.storage_key)

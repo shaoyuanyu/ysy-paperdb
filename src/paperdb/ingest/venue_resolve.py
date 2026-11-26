@@ -52,10 +52,12 @@ async def _by_normalized_name(
     venue = await session.scalar(stmt.limit(1))
     if venue is None and venue_kind is not None:
         venue = await session.scalar(
-            select(Venue).where(
+            select(Venue)
+            .where(
                 Venue.normalized_name == normalized,
                 Venue.merged_into_id.is_(None),
-            ).limit(1)
+            )
+            .limit(1)
         )
     return venue
 
@@ -226,8 +228,10 @@ async def suggest_venue(
                 venue = scored[0][1]
                 evidence = "acronym"
 
-    if venue is None and raw_name and re.match(
-        r"(?i)^(?:in\s+)?(?:proceedings|proc\.?|procs\.?)\b", raw_name.strip()
+    if (
+        venue is None
+        and raw_name
+        and re.match(r"(?i)^(?:in\s+)?(?:proceedings|proc\.?|procs\.?)\b", raw_name.strip())
     ):
         # "Proceedings ..." titles: the canonical venue is embedded verbatim.
         venue = await _by_containment(session, normalize_name(raw_name), venue_kind)

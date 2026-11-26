@@ -52,9 +52,7 @@ async def _detail(
 ) -> ResearchWorkspaceDetail:
     workspace = await get_workspace(session, workspace_id)
     stats = await workspace_stats(session, [workspace.id])
-    papers = await workspace_papers(
-        session, workspace, limit=limit, pending_only=pending_only
-    )
+    papers = await workspace_papers(session, workspace, limit=limit, pending_only=pending_only)
     return ResearchWorkspaceDetail(
         id=workspace.id,
         name=workspace.name,
@@ -83,9 +81,7 @@ async def create_endpoint(
     principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
 ) -> ResearchWorkspaceOut:
-    workspace = await create_workspace(
-        session, name=payload.name, description=payload.description
-    )
+    workspace = await create_workspace(session, name=payload.name, description=payload.description)
     await session.commit()
     stats = await workspace_stats(session, [workspace.id])
     return ResearchWorkspaceOut(
@@ -118,9 +114,7 @@ async def update_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> ResearchWorkspaceDetail:
     workspace = await get_workspace(session, workspace_id)
-    await update_workspace(
-        session, workspace, name=payload.name, description=payload.description
-    )
+    await update_workspace(session, workspace, name=payload.name, description=payload.description)
     await session.commit()
     return await _detail(session, workspace_id)
 
@@ -134,9 +128,7 @@ async def papers_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> list[WorkspacePaperOut]:
     workspace = await get_workspace(session, workspace_id)
-    rows = await workspace_papers(
-        session, workspace, limit=limit, pending_only=pending_only
-    )
+    rows = await workspace_papers(session, workspace, limit=limit, pending_only=pending_only)
     return [WorkspacePaperOut(**item) for item in rows]
 
 
@@ -189,8 +181,6 @@ async def close_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> ResearchWorkspaceDetail:
     workspace = await get_workspace(session, workspace_id)
-    await close_workspace(
-        session, workspace, discard_unpromoted=payload.discard_unpromoted
-    )
+    await close_workspace(session, workspace, discard_unpromoted=payload.discard_unpromoted)
     await session.commit()
     return await _detail(session, workspace_id)

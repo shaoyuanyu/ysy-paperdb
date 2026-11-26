@@ -33,9 +33,7 @@ def _ndss_like_html() -> str:
 
 def _publisher_html() -> str:
     """A publisher page with the full HighWire citation_* tag set."""
-    conference = (
-        "Proceedings of the 2019 CHI Conference on Human Factors in Computing Systems"
-    )
+    conference = "Proceedings of the 2019 CHI Conference on Human Factors in Computing Systems"
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -59,9 +57,7 @@ def test_extract_ndss_like_page() -> None:
         "Bleeding Pathways: Vanishing Discriminability in LLM Hidden States Fuels Jailbreak Attacks"
     )
     assert page.venue_hint == "NDSS Symposium"
-    assert page.pdf_urls == [
-        "https://www.ndss-symposium.org/wp-content/uploads/2026-f4-paper.pdf"
-    ]
+    assert page.pdf_urls == ["https://www.ndss-symposium.org/wp-content/uploads/2026-f4-paper.pdf"]
     assert page.doi is None
     assert page.authors == []
 

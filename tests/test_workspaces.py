@@ -58,15 +58,11 @@ async def test_workspace_stages_hides_and_promotes(client: httpx.AsyncClient) ->
     assert detail["papers"][0]["paperId"] == paper["id"]
     assert detail["papers"][0]["promoted"] is False
 
-    listed = (
-        await client.get("/v1/papers", headers=SERVICE, params={"q": title})
-    ).json()["items"]
+    listed = (await client.get("/v1/papers", headers=SERVICE, params={"q": title})).json()["items"]
     assert all(item["id"] != paper["id"] for item in listed)
 
     included = (
-        await client.get(
-            "/v1/papers", headers=SERVICE, params={"q": title, "includeStaged": True}
-        )
+        await client.get("/v1/papers", headers=SERVICE, params={"q": title, "includeStaged": True})
     ).json()["items"]
     assert any(item["id"] == paper["id"] for item in included)
 
@@ -93,9 +89,7 @@ async def test_workspace_stages_hides_and_promotes(client: httpx.AsyncClient) ->
     assert detail["pendingCount"] == 0
     assert detail["papers"][0]["promoted"] is True
 
-    listed = (
-        await client.get("/v1/papers", headers=SERVICE, params={"q": title})
-    ).json()["items"]
+    listed = (await client.get("/v1/papers", headers=SERVICE, params={"q": title})).json()["items"]
     assert any(item["id"] == paper["id"] for item in listed)
     fetched = (await client.get(f"/v1/papers/{paper['id']}", headers=SERVICE)).json()
     assert fetched["staged"] is False
@@ -185,9 +179,7 @@ async def test_import_into_workspace_stages_paper(
     paper = (await client.get(f"/v1/papers/{paper_id}", headers=SERVICE)).json()
     assert paper["staged"] is True
 
-    listed = (
-        await client.get("/v1/papers", headers=SERVICE, params={"q": title})
-    ).json()["items"]
+    listed = (await client.get("/v1/papers", headers=SERVICE, params={"q": title})).json()["items"]
     assert listed == []
     detail = (await client.get(f"/v1/workspaces/{workspace['id']}", headers=SERVICE)).json()
     assert detail["papers"][0]["paperId"] == paper_id
@@ -259,8 +251,6 @@ async def test_personal_token_with_organize_write_can_use_workspaces(
         "/v1/workspaces", headers=personal, json={"name": "Personal Scope Survey"}
     )
     assert workspace.status_code == 201, workspace.text
-    detail = await client.get(
-        f"/v1/workspaces/{workspace.json()['id']}", headers=personal
-    )
+    detail = await client.get(f"/v1/workspaces/{workspace.json()['id']}", headers=personal)
     assert detail.status_code == 200, detail.text
     assert detail.json()["paperCount"] == 0

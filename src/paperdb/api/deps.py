@@ -21,8 +21,8 @@ async def get_principal(
 
 
 def scoped(scope: str):
-    # 未知 scope 会让该端点对所有令牌恒 403，而且很难从日志看出来；
-    # 在路由注册时直接炸掉（进程起不来），比线上静默失效安全。
+    # An unknown scope makes the endpoint 403 for every token, with no
+    # diagnostic; fail at import time instead of silently at request time.
     if scope not in ALL_SCOPES:
         raise ValueError(f"unknown scope: {scope}")
 

@@ -205,9 +205,7 @@ def _first_author_family(name: str | None) -> str | None:
     return tokens[-1].lower() if tokens else None
 
 
-async def fuzzy_library_match(
-    session: AsyncSession, candidate: Candidate
-) -> dict[str, Any] | None:
+async def fuzzy_library_match(session: AsyncSession, candidate: Candidate) -> dict[str, Any] | None:
     """Exact-normalized-title match against the library (suggestion only).
 
     Papers imported without identifiers (PDF fallback, old imports) are
@@ -460,9 +458,7 @@ def _candidate(records: list[SourceRecord], input_kind: str, raw: str) -> Candid
         arxiv_id = next(
             (str(item["value"]) for item in identifiers if item["scheme"] == "arxiv"), None
         )
-        acl_id = next(
-            (str(item["value"]) for item in identifiers if item["scheme"] == "acl"), None
-        )
+        acl_id = next((str(item["value"]) for item in identifiers if item["scheme"] == "acl"), None)
         if arxiv_id:
             pdf_urls.append(f"https://arxiv.org/pdf/{arxiv_id}")
         elif acl_id:

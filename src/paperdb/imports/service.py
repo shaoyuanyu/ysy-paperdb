@@ -99,9 +99,7 @@ async def merge_new_identifiers(
     return added
 
 
-def _duplicate_decision(
-    candidate: Candidate, on_duplicate: str
-) -> tuple[str | None, str | None]:
+def _duplicate_decision(candidate: Candidate, on_duplicate: str) -> tuple[str | None, str | None]:
     """Decide whether an import links to an existing paper.
 
     Returns (duplicate_paper_id, note). Identifier matches always win;
@@ -141,11 +139,7 @@ async def _apply_import_options(
         )
         # A paper already in the library keeps its visibility; only new or
         # already-staged papers are (re)attached to the staging area.
-        if (
-            workspace is not None
-            and workspace.closed_at is None
-            and (allow_stage or paper.staged)
-        ):
+        if workspace is not None and workspace.closed_at is None and (allow_stage or paper.staged):
             await stage_paper(session, workspace, paper)
 
 
@@ -329,9 +323,7 @@ async def process_import(
                         note += f"+{len(merged)} identifier(s) merged"
                     item.status = ImportItemStatus.duplicate
                     item.paper_id = existing.id
-                    await _apply_import_options(
-                        session, existing, options, allow_stage=False
-                    )
+                    await _apply_import_options(session, existing, options, allow_stage=False)
                     await apply_rules_on(session, existing, "import")
                 if note:
                     item.error = note  # informational; status stays duplicate/skipped
@@ -535,9 +527,7 @@ async def process_bibtex(
                     note += f"+{len(merged)} identifier(s) merged"
                 item.status = ImportItemStatus.duplicate
                 item.paper_id = existing.id
-                await _apply_import_options(
-                    session, existing, options, allow_stage=False
-                )
+                await _apply_import_options(session, existing, options, allow_stage=False)
                 if note:
                     item.error = note  # informational; status stays duplicate
             else:

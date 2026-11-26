@@ -121,9 +121,7 @@ async def test_totp_gate_merge(client: httpx.AsyncClient) -> None:
         lambda paper_id: f"/v1/papers/{paper_id}/tags",  # association removal: NOT gated
     ],
 )
-async def test_association_removal_not_gated(
-    client: httpx.AsyncClient, path_factory
-) -> None:
+async def test_association_removal_not_gated(client: httpx.AsyncClient, path_factory) -> None:
     reset_failures()
     personal = await _personal_token(client)
     paper_id = await _paper(client, SERVICE)
