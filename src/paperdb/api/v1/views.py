@@ -5,7 +5,7 @@ import uuid
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paperdb.api.deps import scoped
+from paperdb.api.deps import require_totp, scoped
 from paperdb.api.schemas import (
     FilterValidateOut,
     FilterValidateRequest,
@@ -111,6 +111,7 @@ async def delete_endpoint(
     view_id: uuid.UUID,
     principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
+    totp: None = Depends(require_totp),
 ) -> Response:
     await delete_view(session, await get_view(session, view_id))
     await session.commit()

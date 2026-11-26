@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paperdb.api.deps import scoped
+from paperdb.api.deps import require_totp, scoped
 from paperdb.api.schemas import TokenCreate, TokenCreated, TokenOut
 from paperdb.auth.scopes import validate_scopes
 from paperdb.auth.tokens import TokenPrincipal, create_personal_token
@@ -77,6 +77,7 @@ async def list_tokens(
 async def revoke_token(
     token_id: uuid.UUID,
     principal: TokenPrincipal = Depends(scoped("admin")),
+    totp: None = Depends(require_totp),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     row = await session.get(ApiToken, token_id)

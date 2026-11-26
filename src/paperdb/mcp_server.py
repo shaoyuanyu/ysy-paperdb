@@ -59,13 +59,22 @@ def _summarize_error(response: httpx.Response) -> str:
         return f"HTTP {response.status_code}"
 
 
-async def _request(method: str, path: str, **kwargs: Any) -> Any:
+async def _request(
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    raw: bool = False,
+    **kwargs: Any,
+) -> Any:
     async with _client() as client:
-        response = await client.request(method, path, **kwargs)
+        response = await client.request(method, path, headers=headers, **kwargs)
     if response.status_code >= 400:
         raise RuntimeError(_summarize_error(response))
     if response.status_code == 204 or not response.content:
         return None
+    if raw:
+        return response.text
     return response.json()
 
 
@@ -243,6 +252,167 @@ async def list_collections() -> str:
 async def get_import(import_id: str) -> str:
     """Get an import job's status and per-item results (poll while pending)."""
     return json.dumps(await _wait_for_import(import_id, timeout_s=0.1), ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_papers(
+    q: str | None = None,
+    collection_id: str | None = None,
+    tag: str | None = None,
+    venue_id: str | None = None,
+    kind: str | None = None,
+    year: int | None = None,
+    status: str | None = None,
+    starred: bool | None = None,
+    unfiled: bool | None = None,
+    limit: int = 20,
+    cursor: str | None = None,
+) -> str:
+    """Browse the library like the web UI: filter papers by search text,
+    collection, tag path, venue, kind (conference/journal/preprint/...), year,
+    reading status, starred, or unfiled. Returns brief papers + nextCursor
+    for pagination."""
+    params: dict[str, Any] = {"limit": limit}
+    if q:
+        params["q"] = q
+    if collection_id:
+        params["collection"] = collection_id
+    if tag:
+        params["tag"] = tag
+    if venue_id:
+        params["venueId"] = venue_id
+    if kind:
+        params["kind"] = kind
+    if year:
+        params["year"] = year
+    if status:
+        params["status"] = status
+    if starred is not None:
+        params["starred"] = starred
+    if unfiled is not None:
+        params["unfiled"] = unfiled
+    if cursor:
+        params["cursor"] = cursor
+    result = await _request("GET", "/v1/papers", params=params)
+    papers = [_brief_paper(item) for item in result.get("items", [])]
+    payload = {"papers": papers, "nextCursor": result.get("nextCursor")}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_tags() -> str:
+    """List the full hierarchical tag tree (namespace paths + paper counts)."""
+    result = await _request("GET", "/v1/tags/tree")
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_projects() -> str:
+    """List project workspaces (name, description, collections, paper count)."""
+    result = await _request("GET", "/v1/projects")
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_project(project_id: str) -> str:
+    """Get one project with its papers (project detail + paper list)."""
+    detail = await _request("GET", f"/v1/projects/{project_id}")
+    papers = await _request("GET", f"/v1/projects/{project_id}/papers", params={"limit": 100})
+    brief = [_brief_paper(item) for item in papers.get("items", [])]
+    payload = dict(detail)
+    payload["papers"] = brief
+    payload["papersNextCursor"] = papers.get("nextCursor")
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_citations(paper_ref: str, kind: str = "references") -> str:
+    """Get a paper's citation graph: 'references' (papers it cites) or
+    'citations' (papers citing it). Library entries are resolved; external
+    works are returned as stubs."""
+    if kind not in {"references", "citations"}:
+        return json.dumps({"error": "kind must be 'references' or 'citations'"})
+    result = await _request("GET", f"/v1/papers/{paper_ref}/{kind}")
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def search_fulltext(q: str, limit: int = 20) -> str:
+    """Full-text search inside stored PDFs: returns paper, file, page number,
+    and a text snippet per hit."""
+    result = await _request("GET", "/v1/search/fulltext", params={"q": q, "limit": limit})
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def set_reading_state(
+    paper_ref: str,
+    status: str | None = None,
+    starred: bool | None = None,
+    priority: int | None = None,
+    rating: int | None = None,
+    progress_page: int | None = None,
+) -> str:
+    """Update a paper's reading state: status
+    (unread/queued/reading/read/skimmed), starred, priority 0-3, rating 1-5,
+    progress page."""
+    payload: dict[str, Any] = {}
+    if status is not None:
+        payload["status"] = status
+    if starred is not None:
+        payload["starred"] = starred
+    if priority is not None:
+        payload["priority"] = priority
+    if rating is not None:
+        payload["rating"] = rating
+    if progress_page is not None:
+        payload["progressPage"] = progress_page
+    result = await _request("PATCH", f"/v1/papers/{paper_ref}/state", json=payload)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_paper_bibtex(ref: str) -> str:
+    """Get a paper's BibTeX entry (the same string used by .bib exports)."""
+    result = await _request("GET", f"/v1/papers/{ref}/bibtex", raw=True)
+    return json.dumps({"bibtex": result}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def delete_paper(paper_ref: str, totp_code: str) -> str:
+    """Delete a paper (soft delete, restorable by the owner).
+
+    DANGEROUS. Requires a current 6-digit TOTP code — the same code your
+    authenticator shows for the site login. Ask the user for the code right
+    before calling; codes expire after ~30 seconds. The call fails with
+    'totp_required'/'totp_invalid' otherwise.
+    """
+    result = await _request(
+        "DELETE",
+        f"/v1/papers/{paper_ref}",
+        headers={"X-TOTP-Code": totp_code.strip()},
+    )
+    return json.dumps({"deleted": paper_ref, "result": result or "204 no content"})
+
+
+@mcp.tool()
+async def merge_papers(source_ref: str, into_ref: str, totp_code: str) -> str:
+    """Merge one paper into another (identifiers/authors/state are merged;
+    the old id redirects; the source is soft-deleted).
+
+    DANGEROUS. Requires a current 6-digit TOTP code from the user's
+    authenticator (same as site login); ask right before calling.
+    """
+    result = await _request(
+        "POST",
+        f"/v1/papers/{source_ref}/merge",
+        json={"into": into_ref, "delete_source": True},
+        headers={"X-TOTP-Code": totp_code.strip()},
+    )
+    return json.dumps(
+        {"merged": source_ref, "into": into_ref, "paper": _brief_paper(result)},
+        ensure_ascii=False,
+    )
 
 
 def main() -> None:

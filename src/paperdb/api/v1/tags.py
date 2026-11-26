@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paperdb.api.deps import scoped
+from paperdb.api.deps import require_totp, scoped
 from paperdb.api.schemas import TagCreate, TagMerge, TagOut, TagUpdate
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.db.session import get_session
@@ -106,6 +106,7 @@ async def delete_endpoint(
     tag_id: uuid.UUID,
     principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
+    totp: None = Depends(require_totp),
 ) -> Response:
     tag = await get_tag(session, tag_id)
     await delete_tag(session, tag)

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
         default="paperdb/0.1 (mailto:me)", validation_alias="ARXIV_USER_AGENT"
     )
     s2_api_key: str | None = Field(default=None, validation_alias="S2_API_KEY")
+    # Same secret as the site login (TOTP, RFC 6238 SHA1/6-digit/30s). When
+    # set, personal tokens must present a current code for destructive
+    # endpoints; the service token bypasses the gate.
+    totp_secret: str | None = Field(default=None, validation_alias="PAPERDB_TOTP_SECRET")
 
     @property
     def cors_origin_list(self) -> list[str]:

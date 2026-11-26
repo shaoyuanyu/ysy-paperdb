@@ -6,7 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, File, Header, Request, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paperdb.api.deps import scoped
+from paperdb.api.deps import require_totp, scoped
 from paperdb.api.schemas import PdfFileOut, PdfUploadOut
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.config import Settings, get_settings
@@ -133,6 +133,7 @@ async def delete_endpoint(
     file_id: uuid.UUID,
     principal: TokenPrincipal = Depends(scoped("pdf:write")),
     session: AsyncSession = Depends(get_session),
+    totp: None = Depends(require_totp),
 ) -> Response:
     file = await get_file(session, file_id)
     await delete_file(session, file)

@@ -12,6 +12,7 @@ os.environ["PAPERDB_SERVICE_TOKEN"] = "pdb_svc_test0123456789abcdef0123456789abc
 os.environ["PAPERDB_TOKEN_PEPPER"] = "test-pepper-0123456789abcdef0123456789"
 os.environ["PAPERDB_STORAGE_BACKEND"] = "local"
 os.environ["PAPERDB_STORAGE_ROOT"] = str(Path(".test-storage").resolve())
+os.environ["PAPERDB_TOTP_SECRET"] = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
 
 import httpx
 import pytest

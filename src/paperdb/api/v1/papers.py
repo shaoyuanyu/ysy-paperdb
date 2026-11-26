@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paperdb.api.deps import scoped
+from paperdb.api.deps import require_totp, scoped
 from paperdb.api.schemas import (
     BulkPatch,
     DuplicateOut,
@@ -233,6 +233,7 @@ async def delete_endpoint(
     ref: str,
     principal: TokenPrincipal = Depends(scoped("papers:write")),
     session: AsyncSession = Depends(get_session),
+    totp: None = Depends(require_totp),
 ) -> Response:
     paper = await get_paper(session, ref)
     await delete_paper(session, paper)
@@ -347,6 +348,7 @@ async def merge_endpoint(
     payload: MergeRequest,
     principal: TokenPrincipal = Depends(scoped("papers:write")),
     session: AsyncSession = Depends(get_session),
+    totp: None = Depends(require_totp),
 ) -> PaperDetail:
     source = await get_paper(session, ref)
     target = await get_paper(session, str(payload.into))

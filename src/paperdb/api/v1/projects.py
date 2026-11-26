@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paperdb.api.deps import scoped
+from paperdb.api.deps import require_totp, scoped
 from paperdb.api.schemas import (
     PaperPage,
     PaperSummary,
@@ -105,6 +105,7 @@ async def delete_endpoint(
     project_id: uuid.UUID,
     principal: TokenPrincipal = Depends(scoped("organize:write")),
     session: AsyncSession = Depends(get_session),
+    totp: None = Depends(require_totp),
 ) -> Response:
     await delete_project(session, await get_project(session, project_id))
     await session.commit()
