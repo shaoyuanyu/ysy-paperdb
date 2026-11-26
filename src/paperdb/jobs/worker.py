@@ -56,14 +56,20 @@ async def run_once(*, settings: Settings | None = None) -> bool:
             await complete(session, job)
             await session.commit()
         except Exception as exc:
-            await session.rollback()
-            job = await session.get(Job, job.id)
-            if job is not None:
-                await fail(session, job, str(exc))
-                await session.commit()
             logger.exception(
                 "job failed id=%s kind=%s", job.id if job else "?", job.kind if job else "?"
             )
+            # Recording the failure must never kill the worker: a broken
+            # connection here (e.g. asyncpg MissingGreenlet during pool ping)
+            # used to take the whole process down with the job.
+            try:
+                await session.rollback()
+                job = await session.get(Job, job.id)
+                if job is not None:
+                    await fail(session, job, f"{type(exc).__name__}: {exc}")
+                    await session.commit()
+            except Exception:
+                logger.exception("could not record job failure id=%s", job.id if job else "?")
         return True
 
 
@@ -72,11 +78,15 @@ async def run_forever(*, settings: Settings | None = None, interval: float = 1.0
     logger.info("paperdb worker started id=%s", worker_id())
     try:
         while True:
-            async with get_sessionmaker()() as session:
-                await reclaim_stale(session)
-                await session.commit()
-            worked = await run_once(settings=settings)
-            if not worked:
+            try:
+                async with get_sessionmaker()() as session:
+                    await reclaim_stale(session)
+                    await session.commit()
+                worked = await run_once(settings=settings)
+                if not worked:
+                    await asyncio.sleep(interval)
+            except Exception:
+                logger.exception("worker loop error; continuing")
                 await asyncio.sleep(interval)
     finally:
         logger.info("paperdb worker stopped id=%s", worker_id())

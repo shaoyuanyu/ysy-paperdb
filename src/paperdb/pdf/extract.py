@@ -4,13 +4,21 @@ import re
 
 import pymupdf
 
+# Postgres text columns reject NUL bytes, and PyMuPDF happily emits them for
+# some embedded fonts; a single 0x00 used to abort the whole extract job.
+_NUL_RE = re.compile("\x00")
+
+
+def clean_text(text: str) -> str:
+    return _NUL_RE.sub("", text)
+
 
 def extract_pdf(data: bytes) -> tuple[int, list[str], str]:
     document = pymupdf.open(stream=data, filetype="pdf")
     try:
         if document.needs_pass:
             raise ValueError("encrypted PDF")
-        pages = [str(page.get_text("text") or "") for page in document]
+        pages = [clean_text(str(page.get_text("text") or "")) for page in document]
         sample = "".join(pages)[:4000]
         non_ascii = sum(1 for char in sample if ord(char) > 127)
         language = "zh" if non_ascii > len(sample) * 0.2 else "en"

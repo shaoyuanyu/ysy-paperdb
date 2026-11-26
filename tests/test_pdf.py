@@ -107,3 +107,11 @@ async def test_pdf_upload_extract_search_annotate(client: httpx.AsyncClient) -> 
     deleted = await client.delete(f"/v1/annotations/{annotation_id}", headers=SERVICE)
     assert deleted.status_code == 204
     assert (await client.get(f"/v1/papers/{paper['id']}/annotations", headers=SERVICE)).json() == []
+
+
+def test_clean_text_strips_nul_bytes() -> None:
+    """A single 0x00 used to abort every extract_pdf job on Postgres."""
+    from paperdb.pdf.extract import clean_text
+
+    assert clean_text("before\x00after") == "beforeafter"
+    assert clean_text("no nul") == "no nul"
