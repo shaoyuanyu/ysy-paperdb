@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from paperdb.auth.scopes import ALL_SCOPES
 from paperdb.auth.tokens import TokenPrincipal, authenticate, extract_bearer, require_scope
 from paperdb.auth.totp import verify_totp
 from paperdb.config import Settings, get_settings
@@ -20,6 +21,11 @@ async def get_principal(
 
 
 def scoped(scope: str):
+    # 未知 scope 会让该端点对所有令牌恒 403，而且很难从日志看出来；
+    # 在路由注册时直接炸掉（进程起不来），比线上静默失效安全。
+    if scope not in ALL_SCOPES:
+        raise ValueError(f"unknown scope: {scope}")
+
     async def dependency(principal: TokenPrincipal = Depends(get_principal)) -> TokenPrincipal:
         require_scope(principal, scope)
         return principal

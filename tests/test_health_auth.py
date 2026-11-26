@@ -82,3 +82,11 @@ async def test_unknown_scope(client: httpx.AsyncClient) -> None:
 async def test_invalid_tokens(client: httpx.AsyncClient, token: str) -> None:
     response = await client.get("/v1/meta", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
+
+
+def test_scoped_rejects_unknown_scope() -> None:
+    """A typo'd scope must fail at route registration, not silently 403 forever."""
+    from paperdb.api.deps import scoped
+
+    with pytest.raises(ValueError, match="unknown scope"):
+        scoped("organize:read")
