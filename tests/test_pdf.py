@@ -104,6 +104,13 @@ async def test_pdf_upload_extract_search_annotate(client: httpx.AsyncClient) -> 
     assert detail["counts"]["pdfFiles"] == 1
     assert detail["counts"]["annotations"] == 1
 
+    # The list endpoint must report the same counts; it used to hardcode 0.
+    listed_papers = (
+        await client.get("/v1/papers", headers=SERVICE, params={"q": paper["title"]})
+    ).json()["items"]
+    assert listed_papers[0]["counts"]["pdfFiles"] == 1
+    assert listed_papers[0]["counts"]["annotations"] == 1
+
     deleted = await client.delete(f"/v1/annotations/{annotation_id}", headers=SERVICE)
     assert deleted.status_code == 204
     assert (await client.get(f"/v1/papers/{paper['id']}/annotations", headers=SERVICE)).json() == []

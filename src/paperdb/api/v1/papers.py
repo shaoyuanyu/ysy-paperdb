@@ -117,8 +117,12 @@ async def list_endpoint(
         cursor=cursor,
     )
     ranks = await ranks_for_venues(session, [paper.venue_id for paper in papers if paper.venue_id])
+    media = await media_counts(session, [paper.id for paper in papers])
     return PaperPage(
-        items=[PaperSummary.model_validate(paper_to_summary(paper, ranks)) for paper in papers],
+        items=[
+            PaperSummary.model_validate(paper_to_summary(paper, ranks, media.get(paper.id)))
+            for paper in papers
+        ],
         next_cursor=next_cursor,
         has_more=has_more,
     )
