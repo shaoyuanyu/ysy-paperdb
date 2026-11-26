@@ -37,6 +37,44 @@ _WS_RE = re.compile(r"\s+")
 # Suffix separators used by og:title/<title> ("Paper - NDSS Symposium").
 _TITLE_SEPARATORS = (" - ", " | ", " · ", " :: ", " — ")
 
+# Some publisher pages carry no citation_conference tag and fall back to
+# og:site_name ("USENIX"), which is not the venue's name. Their URL carries the
+# venue, so map the common families explicitly; citation_* tags still win.
+_URL_VENUE_HINTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"usenix\.org/conference/usenixsecurity\d{0,2}", re.IGNORECASE),
+        "USENIX Security Symposium",
+    ),
+    (
+        re.compile(r"usenix\.org/conference/nsdi\d{0,2}", re.IGNORECASE),
+        "USENIX Symposium on Networked Systems Design and Implementation",
+    ),
+    (
+        re.compile(r"usenix\.org/conference/osdi\d{0,2}", re.IGNORECASE),
+        "USENIX Symposium on Operating Systems Design and Implementation",
+    ),
+    (
+        re.compile(r"usenix\.org/conference/atc\d{0,2}", re.IGNORECASE),
+        "USENIX Annual Technical Conference",
+    ),
+    (
+        re.compile(r"ndss-symposium\.org", re.IGNORECASE),
+        "Network and Distributed System Security Symposium",
+    ),
+)
+
+
+def venue_from_url(url: str) -> str | None:
+    """Best-effort venue name encoded in a well-known publisher URL."""
+    for pattern, name in _URL_VENUE_HINTS:
+        if pattern.search(url):
+            return name
+    return None
+
+
+# og:site_name values that identify the publisher, not the venue.
+_BRAND_ONLY_HINTS = {"usenix", "usenix.org", "www.usenix.org", "usenix association"}
+
 
 @dataclass(slots=True)
 class PageMetadata:
@@ -223,6 +261,11 @@ def extract_page(html: str, url: str) -> PageMetadata:
         or meta.get("citation_journal")
         or site
     )
+    url_hint = venue_from_url(url)
+    if url_hint and (venue_hint is None or venue_hint.lower() in _BRAND_ONLY_HINTS):
+        # og:site_name is often just the publisher brand ("USENIX"); the URL
+        # knows the actual venue.
+        venue_hint = url_hint
 
     # --- PDF links: citation_pdf_url first, then harvested .pdf anchors
     pdf_urls: list[str] = []

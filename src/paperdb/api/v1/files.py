@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import re
 import uuid
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, File, Header, Request, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.api.deps import require_totp, scoped
-from paperdb.api.schemas import PdfFileOut, PdfUploadOut
+from paperdb.api.schemas import PdfFileOut, PdfFromUrlRequest, PdfUploadOut
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.config import Settings, get_settings
 from paperdb.db.models import PdfFile, PdfPageText
 from paperdb.db.session import get_session
 from paperdb.errors import ApiError
+from paperdb.imports.pdf_import import fetch_pdf_bytes
 from paperdb.jobs.queue import enqueue
 from paperdb.papers.service import get_paper
 from paperdb.pdf.service import (
@@ -25,6 +27,11 @@ from paperdb.pdf.service import (
 from paperdb.storage import get_storage
 
 router = APIRouter(tags=["files"])
+
+
+def _filename_from_url(url: str) -> str | None:
+    name = urlsplit(url).path.rsplit("/", 1)[-1]
+    return name[:200] if name and "." in name else None
 
 
 def _out(file: PdfFile) -> PdfFileOut:
@@ -60,6 +67,35 @@ async def upload_endpoint(
         data=data,
         filename=file.filename,
         settings=settings,
+    )
+    await session.commit()
+    return PdfUploadOut(file=_out(record), job_id=job_id)
+
+
+@router.post(
+    "/papers/{ref}/files/from-url", response_model=PdfUploadOut, status_code=status.HTTP_201_CREATED
+)
+async def upload_from_url_endpoint(
+    ref: str,
+    payload: PdfFromUrlRequest,
+    principal: TokenPrincipal = Depends(scoped("pdf:write")),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> PdfUploadOut:
+    """Attach a PDF (fetched from a direct URL) to an existing paper.
+
+    The repair path for metadata-only imports: no new paper is created and no
+    duplicate can appear, unlike the import endpoints.
+    """
+    paper = await get_paper(session, ref)
+    data = await fetch_pdf_bytes(payload.url, settings)
+    record, job_id = await create_file(
+        session,
+        paper=paper,
+        data=data,
+        filename=payload.filename or _filename_from_url(payload.url),
+        settings=settings,
+        source_url=payload.url,
     )
     await session.commit()
     return PdfUploadOut(file=_out(record), job_id=job_id)

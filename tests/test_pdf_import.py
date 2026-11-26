@@ -199,3 +199,88 @@ async def test_import_pdf_from_url_invalid_url(client: httpx.AsyncClient) -> Non
         json={"url": "ftp://example.org/paper.pdf"},
     )
     assert response.status_code == 422
+
+
+def _running_header_pdf(header: str, title: str) -> bytes:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((50, 40), header, fontsize=7)
+    page.insert_text((50, 110), title, fontsize=20)
+    page.insert_text((50, 140), "Alice Example, Bob Example", fontsize=11)
+    document.set_metadata({"title": header})
+    data = document.tobytes()
+    document.close()
+    return data
+
+
+def test_inspect_pdf_skips_running_header() -> None:
+    """Proceedings running heads must not become the paper title."""
+    header = (
+        "Findings of the Association for Computational Linguistics: ACL 2026, pages 15020-15037"
+    )
+    title = "When Safety Alignment Fails to Generalize"
+    meta = inspect_pdf(_running_header_pdf(header, title), "paper.pdf")
+    assert meta.title == title
+
+
+async def test_identical_pdf_links_to_existing(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, drain_queue: None
+) -> None:
+    async def no_lookup(session, raw, settings, **kwargs):
+        return None, ["no external record"]
+
+    monkeypatch.setattr("paperdb.imports.pdf_import.resolve_input", no_lookup)
+    data = _pdf(f"Duplicate PDF {uuid.uuid4().hex[:8]}")
+
+    first = await client.post(
+        "/v1/imports/pdf",
+        headers=SERVICE,
+        files={"file": ("paper.pdf", data, "application/pdf")},
+    )
+    assert first.status_code == 201, first.text
+
+    second = await client.post(
+        "/v1/imports/pdf",
+        headers=SERVICE,
+        files={"file": ("paper.pdf", data, "application/pdf")},
+    )
+    assert second.status_code == 201, second.text
+    body = second.json()
+    assert body["created"] is False
+    assert body["paperId"] == first.json()["paperId"]
+    files = (await client.get(f"/v1/papers/{body['paperId']}/files", headers=SERVICE)).json()
+    assert len(files) == 1
+
+
+async def test_attach_pdf_from_url(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, drain_queue: None
+) -> None:
+    paper = await client.post(
+        "/v1/papers",
+        headers=SERVICE,
+        json={
+            "kind": "preprint",
+            "title": f"Attach Target {uuid.uuid4().hex[:8]}",
+            "year": 2026,
+            "authors": [{"displayName": "Alice Example"}],
+        },
+    )
+    assert paper.status_code == 201, paper.text
+    paper_id = paper.json()["id"]
+
+    async def fake_fetch(url: str, settings) -> bytes:
+        assert url == "https://example.org/paper.pdf"
+        return _pdf("Attached PDF")
+
+    monkeypatch.setattr("paperdb.api.v1.files.fetch_pdf_bytes", fake_fetch)
+    response = await client.post(
+        f"/v1/papers/{paper_id}/files/from-url",
+        headers=SERVICE,
+        json={"url": "https://example.org/paper.pdf"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["file"]["paperId"] == paper_id
+
+    files = (await client.get(f"/v1/papers/{paper_id}/files", headers=SERVICE)).json()
+    assert len(files) == 1
+    assert files[0]["originalFilename"] == "paper.pdf"

@@ -135,6 +135,7 @@ class PaperSummary(ApiModel):
     counts: CountsOut = Field(default_factory=CountsOut)
     tags: list[str] = Field(default_factory=list)
     collections: list[uuid.UUID] = Field(default_factory=list)
+    staged: bool = False
     created_at: datetime
     updated_at: datetime
     version: int
@@ -517,6 +518,9 @@ class ImportOptions(ApiModel):
     on_duplicate: Literal["skip", "link", "create"] = "link"
     default_tags: list[str] = Field(default_factory=list)
     default_collection_id: uuid.UUID | None = None
+    # Papers land in this research workspace and stay staged (hidden from the
+    # library) until promoted.
+    default_workspace_id: uuid.UUID | None = None
 
 
 class ImportIdentifiersRequest(ApiModel):
@@ -810,6 +814,11 @@ class PdfUploadOut(ApiModel):
     job_id: uuid.UUID | None = None
 
 
+class PdfFromUrlRequest(ApiModel):
+    url: str
+    filename: str | None = None
+
+
 class AnnotationCreate(ApiModel):
     pdf_file_id: uuid.UUID
     kind: str = "highlight"
@@ -909,3 +918,53 @@ class PdfImportCreated(ApiModel):
 class PdfUrlImportRequest(ApiModel):
     url: str = Field(min_length=8, max_length=2000)
     filename: str | None = Field(default=None, max_length=255)
+
+
+class ResearchWorkspaceCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+
+
+class ResearchWorkspaceUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+
+
+class ResearchWorkspaceOut(ApiModel):
+    id: uuid.UUID
+    name: str
+    description: str | None = None
+    created_at: datetime
+    closed_at: datetime | None = None
+    paper_count: int = 0
+    pending_count: int = 0
+
+
+class ResearchWorkspacePage(ApiModel):
+    items: list[ResearchWorkspaceOut] = Field(default_factory=list)
+
+
+class WorkspacePapersInput(ApiModel):
+    paper_refs: list[str] = Field(min_length=1, max_length=200)
+
+
+class WorkspacePromoteInput(WorkspacePapersInput):
+    collection_id: uuid.UUID | None = None
+
+
+class WorkspaceCloseInput(ApiModel):
+    discard_unpromoted: bool = False
+
+
+class WorkspacePaperOut(ApiModel):
+    paper_id: uuid.UUID
+    citekey: str
+    title: str
+    year: int
+    kind: str
+    promoted: bool = False
+    note: str | None = None
+
+
+class ResearchWorkspaceDetail(ResearchWorkspaceOut):
+    papers: list[WorkspacePaperOut] = Field(default_factory=list)

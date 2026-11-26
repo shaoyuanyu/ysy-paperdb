@@ -18,7 +18,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import paperdb.db.models  # noqa: F401
 from paperdb.db.base import Base
@@ -65,6 +65,29 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         yield http
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncIterator[AsyncSession]:
+    """Direct DB session for service-level tests (no HTTP layer)."""
+    from paperdb.db.session import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
+async def drain_queue() -> AsyncIterator[None]:
+    """Run pending worker jobs after a test that enqueues them.
+
+    The queue is global: a leftover extract_pdf job would otherwise be the one
+    a later test's run_once() executes.
+    """
+    yield
+    from paperdb.jobs.worker import run_once
+
+    while await run_once():
+        pass
 
 
 @pytest.fixture

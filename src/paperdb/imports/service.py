@@ -30,6 +30,7 @@ from paperdb.db.models import (
     Paper,
     PaperIdentifier,
     PaperTag,
+    ResearchWorkspace,
 )
 from paperdb.errors import ApiError
 from paperdb.ingest.resolve import (
@@ -44,6 +45,7 @@ from paperdb.ingest.venue_resolve import ensure_venue
 from paperdb.jobs.queue import enqueue
 from paperdb.organize.rules import apply_rules_on
 from paperdb.organize.tags import ensure_tag_path
+from paperdb.organize.workspaces import stage_paper
 from paperdb.papers.bibtex_import import (
     entry_as_json,
     entry_from_json,
@@ -121,7 +123,7 @@ def _duplicate_decision(
 
 
 async def _apply_import_options(
-    session: AsyncSession, paper: Paper, options: dict
+    session: AsyncSession, paper: Paper, options: dict, *, allow_stage: bool = True
 ) -> None:
     for path in options.get("defaultTags") or []:
         tag = await ensure_tag_path(session, str(path))
@@ -133,6 +135,18 @@ async def _apply_import_options(
             await session.get(CollectionPaper, (collection.id, paper.id)) is None
         ):
             session.add(CollectionPaper(collection_id=collection.id, paper_id=paper.id))
+    if options.get("defaultWorkspaceId"):
+        workspace = await session.get(
+            ResearchWorkspace, uuid.UUID(str(options["defaultWorkspaceId"]))
+        )
+        # A paper already in the library keeps its visibility; only new or
+        # already-staged papers are (re)attached to the staging area.
+        if (
+            workspace is not None
+            and workspace.closed_at is None
+            and (allow_stage or paper.staged)
+        ):
+            await stage_paper(session, workspace, paper)
 
 
 def _stats(items: list[ImportItem]) -> dict[str, int]:
@@ -172,6 +186,11 @@ async def create_import_job(
                 "defaultCollectionId": (
                     str(payload.options.default_collection_id)
                     if payload.options.default_collection_id
+                    else None
+                ),
+                "defaultWorkspaceId": (
+                    str(payload.options.default_workspace_id)
+                    if payload.options.default_workspace_id
                     else None
                 ),
             }
@@ -310,7 +329,9 @@ async def process_import(
                         note += f"+{len(merged)} identifier(s) merged"
                     item.status = ImportItemStatus.duplicate
                     item.paper_id = existing.id
-                    await _apply_import_options(session, existing, options)
+                    await _apply_import_options(
+                        session, existing, options, allow_stage=False
+                    )
                     await apply_rules_on(session, existing, "import")
                 if note:
                     item.error = note  # informational; status stays duplicate/skipped
@@ -462,6 +483,7 @@ async def process_bibtex(
             continue
         item.attempts += 1
         item.error = None
+        options = (import_job.input or {}).get("options") or {}
         try:
             entry = entry_from_json(item.raw_input)
             bib_candidate = entry_to_candidate(entry)
@@ -513,6 +535,9 @@ async def process_bibtex(
                     note += f"+{len(merged)} identifier(s) merged"
                 item.status = ImportItemStatus.duplicate
                 item.paper_id = existing.id
+                await _apply_import_options(
+                    session, existing, options, allow_stage=False
+                )
                 if note:
                     item.error = note  # informational; status stays duplicate
             else:
@@ -549,19 +574,7 @@ async def process_bibtex(
                             edition.id if edition else None,
                         ),
                     )
-                options = (import_job.input or {}).get("options") or {}
-                for path in options.get("defaultTags") or []:
-                    tag = await ensure_tag_path(session, str(path))
-                    if await session.get(PaperTag, (paper.id, tag.id)) is None:
-                        session.add(PaperTag(paper_id=paper.id, tag_id=tag.id))
-                if options.get("defaultCollectionId"):
-                    collection = await session.get(
-                        Collection, uuid.UUID(str(options["defaultCollectionId"]))
-                    )
-                    if collection is not None and (
-                        await session.get(CollectionPaper, (collection.id, paper.id)) is None
-                    ):
-                        session.add(CollectionPaper(collection_id=collection.id, paper_id=paper.id))
+                await _apply_import_options(session, paper, options)
                 await apply_rules_on(session, paper, "import")
                 item.status = ImportItemStatus.created
                 item.paper_id = paper.id

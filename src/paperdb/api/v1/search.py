@@ -47,11 +47,12 @@ async def file_search_endpoint(
 async def fulltext_endpoint(
     q: str = Query(min_length=1, max_length=200),
     limit: int = Query(default=20, ge=1, le=100),
+    include_staged: bool = Query(default=False, alias="includeStaged"),
     principal: TokenPrincipal = Depends(scoped("papers:read")),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> FulltextSearchOut:
-    rows = await search_pages(session, q, limit=limit)
+    rows = await search_pages(session, q, limit=limit, include_staged=include_staged)
     return FulltextSearchOut(
         query=q,
         hits=[

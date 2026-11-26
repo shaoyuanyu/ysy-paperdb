@@ -21,8 +21,10 @@ from paperdb.api.schemas import (
     StateInput,
 )
 from paperdb.db.models import (
+    Annotation,
     Author,
     AuthorStatus,
+    CollectionPaper,
     IdentifierScheme,
     MergeRedirect,
     Paper,
@@ -30,6 +32,8 @@ from paperdb.db.models import (
     PaperIdentifier,
     PaperKind,
     PaperState,
+    PaperTag,
+    PdfFile,
     ReadingStatus,
     Venue,
     VenueEdition,
@@ -556,6 +560,7 @@ def paper_to_summary(
         },
         "tags": sorted(tag.path for tag in paper.tags),
         "collections": [collection.id for collection in paper.collections],
+        "staged": paper.staged,
         "created_at": paper.created_at,
         "updated_at": paper.updated_at,
         "version": paper.version,
@@ -626,8 +631,24 @@ async def list_papers(
     filter_payload: dict[str, Any] | None,
     limit: int,
     cursor: str | None,
+    include_staged: bool = False,
+    workspace_id: uuid.UUID | None = None,
 ) -> tuple[list[Paper], str | None, bool]:
     stmt: Select = select(Paper).options(*PAPER_OPTIONS).where(Paper.deleted_at.is_(None))
+    if workspace_id is not None:
+        from paperdb.db.models import ResearchWorkspacePaper
+
+        # A workspace view is explicitly staged: show its papers even though
+        # they are hidden from the library by default.
+        stmt = stmt.where(
+            Paper.id.in_(
+                select(ResearchWorkspacePaper.paper_id).where(
+                    ResearchWorkspacePaper.workspace_id == workspace_id
+                )
+            )
+        )
+    elif not include_staged:
+        stmt = stmt.where(Paper.staged.is_(False))
     if filter_payload:
         stmt = stmt.where(compile_filter(filter_payload))
     if q:
@@ -789,6 +810,79 @@ async def merge_papers(
         next_position += 1
     for link in list(source.authors):
         await session.delete(link)
+
+    now = datetime.now(UTC)
+
+    # Attachments survive a merge. An exact duplicate (same stored object) is
+    # dropped instead of being attached twice, and primary flags are kept
+    # consistent with the (paper_id) partial unique index.
+    target_files = list(
+        (
+            await session.scalars(
+                select(PdfFile).where(PdfFile.paper_id == target.id, PdfFile.deleted_at.is_(None))
+            )
+        ).all()
+    )
+    target_file_keys = {(file.storage_backend, file.storage_key) for file in target_files}
+    target_has_primary = any(file.is_primary for file in target_files)
+    for file in (
+        await session.scalars(select(PdfFile).where(PdfFile.paper_id == source.id))
+    ).all():
+        if file.deleted_at is not None:
+            continue
+        key = (file.storage_backend, file.storage_key)
+        if key in target_file_keys:
+            file.deleted_at = now
+            continue
+        file.paper_id = target.id
+        target_file_keys.add(key)
+        if file.is_primary:
+            if target_has_primary:
+                file.is_primary = False
+            else:
+                target_has_primary = True
+
+    for annotation in (
+        await session.scalars(select(Annotation).where(Annotation.paper_id == source.id))
+    ).all():
+        annotation.paper_id = target.id
+
+    # Tags/collections are many-to-many: move the links, drop the duplicates.
+    target_tag_ids = set(
+        (await session.scalars(select(PaperTag.tag_id).where(PaperTag.paper_id == target.id))).all()
+    )
+    for link in (
+        await session.scalars(select(PaperTag).where(PaperTag.paper_id == source.id))
+    ).all():
+        if link.tag_id in target_tag_ids:
+            await session.delete(link)
+        else:
+            session.add(PaperTag(paper_id=target.id, tag_id=link.tag_id))
+            await session.delete(link)
+            target_tag_ids.add(link.tag_id)
+
+    target_collection_ids = set(
+        (
+            await session.scalars(
+                select(CollectionPaper.collection_id).where(CollectionPaper.paper_id == target.id)
+            )
+        ).all()
+    )
+    for link in (
+        await session.scalars(select(CollectionPaper).where(CollectionPaper.paper_id == source.id))
+    ).all():
+        if link.collection_id in target_collection_ids:
+            await session.delete(link)
+        else:
+            session.add(
+                CollectionPaper(
+                    collection_id=link.collection_id,
+                    paper_id=target.id,
+                    position=link.position,
+                )
+            )
+            await session.delete(link)
+            target_collection_ids.add(link.collection_id)
 
     if target.state is None and source.state is not None:
         source.state.paper_id = target.id

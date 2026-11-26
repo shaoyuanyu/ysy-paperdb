@@ -114,3 +114,13 @@ def test_short_og_description_ignored_as_abstract() -> None:
     </head><body></body></html>"""
     page = extract_page(html, "https://example.org/p/1")
     assert page.abstract is None
+
+
+def test_venue_from_url_usenix() -> None:
+    from paperdb.ingest.page import venue_from_url
+
+    assert (
+        venue_from_url("https://www.usenix.org/conference/usenixsecurity25/presentation/he-jinwen")
+        == "USENIX Security Symposium"
+    )
+    assert venue_from_url("https://example.org/paper") is None

@@ -60,6 +60,60 @@ async def _by_normalized_name(
     return venue
 
 
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    size = len(needle)
+    if size < 3 or size > len(haystack):
+        return False
+    return any(haystack[i : i + size] == needle for i in range(len(haystack) - size + 1))
+
+
+def _is_subsequence(haystack: list[str], needle: list[str]) -> bool:
+    """True when every token of ``needle`` appears in order in ``haystack``.
+
+    Tolerates publisher-inserted words ("ACM SIGSAC Conference on ..." vs CCF's
+    "ACM Conference on ..."), while rejecting a different venue: a token the
+    canonical name requires (e.g. "Asia" for AsiaCCS) is never skipped.
+    """
+    position = 0
+    for token in needle:
+        while position < len(haystack) and haystack[position] != token:
+            position += 1
+        if position == len(haystack):
+            return False
+        position += 1
+    return True
+
+
+async def _by_containment(
+    session: AsyncSession, normalized: str, venue_kind: VenueKind | None
+) -> Venue | None:
+    """Match a decorated proceedings title to the canonical venue it embeds.
+
+    Crossref and publisher pages spell venues out ("Proceedings 2026 Network
+    and Distributed System Security Symposium", "Proceedings of the 2024 on ACM
+    SIGSAC Conference on ..."), while the library stores the bare name. The
+    canonical name is then an ordered token subsequence of the candidate name;
+    a contiguous run beats a gapped one, and the longest name wins ties.
+    """
+    tokens = normalized.split()
+    if len(tokens) < 3:
+        return None
+    stmt = select(Venue).where(Venue.merged_into_id.is_(None))
+    if venue_kind is not None:
+        stmt = stmt.where(Venue.kind == venue_kind)
+    best: tuple[tuple[int, int], Venue] | None = None
+    for candidate in (await session.scalars(stmt)).all():
+        needle = candidate.normalized_name.split()
+        if len(needle) < 3 or not _is_subsequence(tokens, needle):
+            continue
+        score = (1 if _contains_run(tokens, needle) else 0, len(needle))
+        if best is None or score > best[0]:
+            best = (score, candidate)
+    if best is None and venue_kind is not None:
+        return await _by_containment(session, normalized, None)
+    return best[1] if best else None
+
+
 async def suggest_venue(
     session: AsyncSession,
     *,
@@ -171,6 +225,14 @@ async def suggest_venue(
             if scored and (len(scored) == 1 or scored[0][0] >= 2):
                 venue = scored[0][1]
                 evidence = "acronym"
+
+    if venue is None and raw_name and re.match(
+        r"(?i)^(?:in\s+)?(?:proceedings|proc\.?|procs\.?)\b", raw_name.strip()
+    ):
+        # "Proceedings ..." titles: the canonical venue is embedded verbatim.
+        venue = await _by_containment(session, normalize_name(raw_name), venue_kind)
+        if venue is not None:
+            evidence = "proceedings"
 
     if venue is None:
         return VenueSuggestion(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.config import Settings
-from paperdb.db.models import Paper
+from paperdb.db.models import Paper, PdfFile
 from paperdb.errors import ApiError
 from paperdb.imports.service import _paper_payload, merge_new_identifiers
 from paperdb.ingest.http import build_client
@@ -27,6 +28,15 @@ _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 _ARXIV_RE = re.compile(r"arXiv[:\s]+(\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
 _ACL_RE = re.compile(r"\b((?:19|20)\d{2}\.[a-z0-9-]+\.\d+)\b", re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
+# Running heads of proceedings volumes ("Findings of the ACL 2026, pages
+# 15020-15037") are the most common PDF-metadata trap: they are long, early,
+# and look like a title to every naive line picker.
+_RUNNING_HEADER_RE = re.compile(
+    r"(?i)^(?:in\s+)?(?:proceedings|findings|lecture notes|advances in|"
+    r"conference proceedings|workshop proceedings)\b"
+)
+_PAGES_RE = re.compile(r"(?i)\bpages?\s+\d+\s*[-\u2013]\s*\d+\b")
+_SERIAL_RE = re.compile(r"(?i)\b(?:issn|isbn|doi\s*:|https?://)\b")
 
 
 @dataclass(slots=True)
@@ -44,19 +54,90 @@ def _clean(value: str | None) -> str:
     return _WS_RE.sub(" ", value or "").strip()
 
 
-def _title_from_metadata(raw: str | None, first_page: str, filename: str | None) -> str:
+def _looks_like_running_header(text: str) -> bool:
+    return bool(
+        _RUNNING_HEADER_RE.match(text) or _PAGES_RE.search(text) or _SERIAL_RE.search(text)
+    )
+
+
+def _plausible_title(text: str) -> bool:
+    return (
+        8 <= len(text) <= 500
+        and not re.fullmatch(r"(?i)(untitled|document|paper|pdf)", text)
+        and not text.lower().endswith(".pdf")
+        and not _looks_like_running_header(text)
+    )
+
+
+def _title_from_page_layout(page: pymupdf.Page) -> str | None:
+    """Pick the visually dominant text block in the top half of page 1.
+
+    Font size is what separates the title from the running head, the author
+    list and the affiliations; line order alone cannot.
+    """
+    height = float(page.rect.height) or 1.0
+    layout: list[tuple[float, float, float, str]] = []
+    payload = page.get_text("dict")
+    blocks = payload.get("blocks", []) if isinstance(payload, dict) else []
+    for block in blocks:
+        if block.get("type") != 0:
+            continue
+        bbox = block.get("bbox", (0, 0, 0, 0))
+        y0, y1 = float(bbox[1]), float(bbox[3])
+        if y0 > height * 0.55:
+            continue
+        lines = [line for line in block.get("lines", []) if line.get("spans")]
+        if not lines:
+            continue
+        text = _clean(
+            " ".join("".join(span.get("text", "") for span in line["spans"]) for line in lines)
+        )
+        if not _plausible_title(text) or "@" in text:
+            continue
+        size = max(
+            float(span.get("size", 0.0)) for line in lines for span in line.get("spans", [])
+        )
+        layout.append((size, y0, y1, text))
+    if not layout:
+        return None
+    # The title is the topmost block set in (near) the page's largest font;
+    # length is irrelevant — long affiliation lines are set in body size. A
+    # wrapped title is stitched back together from consecutive blocks.
+    largest = max(item[0] for item in layout)
+    prominent = [item for item in layout if item[0] >= largest * 0.85]
+    prominent.sort(key=lambda item: item[1])
+    size0 = prominent[0][0]
+    parts = [prominent[0][3]]
+    previous_bottom = prominent[0][2]
+    for size, y0, y1, text in prominent[1:]:
+        if abs(size - size0) > max(1.0, size0 * 0.12) or y0 - previous_bottom > height * 0.045:
+            break
+        if sum(len(part) for part in parts) + len(text) > 350:
+            break
+        parts.append(text)
+        previous_bottom = y1
+    return " ".join(parts)
+
+
+def _title_from_metadata(
+    raw: str | None, first_page: str, filename: str | None, layout_title: str | None = None
+) -> str:
     title = _clean(raw)
     if title.lower().startswith("microsoft word - "):
         title = _clean(title[len("Microsoft Word - ") :])
     title = title.strip(" -_")
-    if len(title) >= 8 and not re.fullmatch(r"(?i)(untitled|document|paper|pdf)", title):
+    if _plausible_title(title):
         return title[:500]
-    # Fall back to the longest plausible early line on the first page. This is
-    # deliberately conservative: journal headers and author lines are skipped.
+    if layout_title:
+        return layout_title[:500]
+    # Last resort: the longest plausible early line, skipping headers/author
+    # lines. Deliberately conservative.
     candidates = []
     for line in first_page.splitlines()[:12]:
         line = _clean(line)
         if 12 <= len(line) <= 300 and not re.search(r"@|https?://|doi\.org", line, re.I):
+            if _looks_like_running_header(line):
+                continue
             candidates.append(line)
     if candidates:
         return max(candidates, key=len)[:500]
@@ -91,9 +172,11 @@ def inspect_pdf(data: bytes, filename: str | None = None) -> PdfMetadata:
             raise ValueError("encrypted PDF")
         metadata = document.metadata or {}
         first_page = ""
+        layout_title = None
         if len(document):
             first_page = str(document[0].get_text("text") or "")
-        title = _title_from_metadata(metadata.get("title"), first_page, filename)
+            layout_title = _title_from_page_layout(document[0])
+        title = _title_from_metadata(metadata.get("title"), first_page, filename, layout_title)
         text = first_page[:12000]
         doi_match = _DOI_RE.search(text)
         doi = doi_match.group(0).rstrip(".,;)]}>").lower() if doi_match else None
@@ -257,6 +340,25 @@ async def import_pdf(
     except Exception as exc:
         raise ApiError(422, "invalid_pdf", f"Could not inspect PDF: {exc}") from exc
 
+    # The same file may already be attached to an existing entry (re-upload,
+    # "attach PDF" of a paper imported earlier). Content is the strongest
+    # duplicate signal there is: link instead of importing it twice.
+    digest = hashlib.sha256(data).hexdigest()
+    existing = await session.scalar(
+        select(PdfFile).where(PdfFile.sha256 == digest, PdfFile.deleted_at.is_(None)).limit(1)
+    )
+    if existing is not None:
+        existing_paper = await session.get(Paper, existing.paper_id)
+        if existing_paper is not None and existing_paper.deleted_at is None:
+            return PdfImportResult(
+                paper=existing_paper,
+                file_id=existing.id,
+                job_id=None,
+                created=False,
+                title=existing_paper.title,
+                warnings=["linked by identical PDF (same sha256); metadata lookup skipped"],
+            )
+
     warnings: list[str] = []
     candidate: Candidate | None = None
     lookup: str | None = None
@@ -320,6 +422,19 @@ def _filename_from_url(url: str, fallback: str) -> str:
     if base and "." in base:
         return base[:200]
     return fallback
+
+
+async def fetch_pdf_bytes(url: str, settings: Settings) -> bytes:
+    """Download a PDF from a direct link (used to attach a file to a paper)."""
+    if not url.startswith(("http://", "https://")):
+        raise ApiError(422, "invalid_url", "Only http(s) URLs are supported")
+    async with build_client(settings) as client:
+        data = await _fetch_bytes(client, url, settings)
+    if not data:
+        raise ApiError(422, "pdf_fetch_failed", f"could not download a file from {url}")
+    if not data.startswith(b"%PDF-"):
+        raise ApiError(422, "not_a_pdf", f"{url} did not return a PDF")
+    return data
 
 
 async def import_pdf_from_url(
@@ -414,6 +529,7 @@ async def import_pdf_from_url(
             filename=filename
             or _filename_from_url(source_url or url, f"{paper.citekey or 'paper'}.pdf"),
             settings=settings,
+            source_url=source_url or url,
         )
         await session.flush()
         return PdfImportResult(

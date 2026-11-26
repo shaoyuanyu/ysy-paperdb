@@ -118,13 +118,17 @@ Next: production smoke + periodic citation sync; optional graph canvas.
 ## Agent integration (MCP server + skill)
 
 `src/paperdb/mcp_server.py` wraps the HTTP API as an MCP stdio server
-(`uv sync --extra mcp`, then `.venv/bin/paperdb-mcp`), exposing 10 tools:
-`resolve`, `import_paper`, `import_paper_with_pdf`, `import_bibtex`,
-`get_paper`, `search_papers`, `add_tags`, `add_to_collection`,
-`list_collections`, `get_import`. Import tools poll their job and return the
-final per-item status plus the paper. Configuration via env:
-`PAPERDB_MCP_BASE_URL` (default `http://127.0.0.1:9720`) and
-`PAPERDB_MCP_TOKEN` (required).
+(`uv sync --extra mcp`, then `.venv/bin/paperdb-mcp`), exposing 33 tools
+covering import (`import_paper`, `import_papers`, `import_paper_with_pdf`,
+`import_bibtex`), lookup/browsing (`resolve`, `get_paper`, `list_papers`,
+`search_papers`, `list_files`, `search_fulltext`, citation graph), organization
+(tags/collections/projects/reading state, and **research workspaces** —
+staging areas whose papers stay out of the library until promoted), **repair**
+(`update_paper`, `attach_pdf`, `list_venues`) and TOTP-gated
+`delete_paper`/`merge_papers`.
+Import tools poll their job and return the final per-item status plus the
+paper. Configuration via env: `PAPERDB_MCP_BASE_URL` (default
+`http://127.0.0.1:9720`) and `PAPERDB_MCP_TOKEN` (required).
 
 The DeepSeek Harness registration lives at the workspace root in
 `for-agents/mcp/dsh-paperdb-mcp/` (bundle inserting `@deepseek-ai/dsh-mcp-client`,

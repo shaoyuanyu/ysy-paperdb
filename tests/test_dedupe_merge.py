@@ -3,11 +3,21 @@ from __future__ import annotations
 import uuid
 
 import httpx
+import pymupdf
 import pytest
 
 from paperdb.ingest.types import AuthorRecord, Candidate, VenueSuggestion
 
 SERVICE = {"Authorization": "Bearer pdb_svc_test0123456789abcdef0123456789abcdef"}
+
+
+def _pdf_bytes() -> bytes:
+    document = pymupdf.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Merge Attachment Test", fontsize=12)
+    data = document.tobytes()
+    document.close()
+    return data
 
 
 async def _venue(client: httpx.AsyncClient) -> dict:
@@ -116,3 +126,53 @@ async def test_enrich_job(client: httpx.AsyncClient, monkeypatch: pytest.MonkeyP
     assert fetched["title"].startswith("Enriched")
     assert fetched["abstract"] == "Enriched abstract."
     assert fetched["version"] >= 2
+
+
+async def test_merge_moves_files_tags_and_collections(
+    client: httpx.AsyncClient, drain_queue: None
+) -> None:
+    """Merging must not lose what the duplicate entry carried."""
+    venue = await _venue(client)
+    title = f"Merge Attachment {uuid.uuid4().hex[:8]}"
+    target = await _create(client, title, venue["id"])
+    source = await _create(client, title, venue["id"])
+
+    uploaded = await client.post(
+        f"/v1/papers/{source['id']}/files",
+        headers=SERVICE,
+        files={"file": ("paper.pdf", _pdf_bytes(), "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    tag_path = f"merge/{uuid.uuid4().hex[:6]}"
+    tagged = await client.post(
+        f"/v1/papers/{source['id']}/tags", headers=SERVICE, json={"paths": [tag_path]}
+    )
+    assert tagged.status_code == 200, tagged.text
+
+    created = await client.post(
+        "/v1/collections",
+        headers=SERVICE,
+        json={"name": f"Merge {uuid.uuid4().hex[:6]}"},
+    )
+    assert created.status_code == 201, created.text
+    collection_id = created.json()["id"]
+    added = await client.post(
+        f"/v1/papers/{source['id']}/collections",
+        headers=SERVICE,
+        json={"collectionIds": [collection_id]},
+    )
+    assert added.status_code == 200, added.text
+
+    merged = await client.post(
+        f"/v1/papers/{source['id']}/merge", headers=SERVICE, json={"into": target["id"]}
+    )
+    assert merged.status_code == 200, merged.text
+    body = merged.json()
+    assert tag_path in body["tags"]
+    assert collection_id in body["collections"]
+    assert body["counts"]["pdfFiles"] == 1
+
+    files = (await client.get(f"/v1/papers/{target['id']}/files", headers=SERVICE)).json()
+    assert len(files) == 1
+    assert files[0]["paperId"] == target["id"]

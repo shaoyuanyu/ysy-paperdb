@@ -124,6 +124,9 @@ async def export_bib(
         stmt = stmt.where(Paper.id == record.scope_id)
     elif record.scope_type != "library":
         raise ApiError(404, "not_found", "Export link not found")
+    else:
+        # Staging-area papers are not part of the exported library.
+        stmt = stmt.where(Paper.staged.is_(False))
     papers = list((await session.scalars(stmt)).all())
     body = render_bibtex(papers, include_abstract=record.include_abstract)
     etag = hashlib.sha256(body.encode()).hexdigest()

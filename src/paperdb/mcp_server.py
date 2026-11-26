@@ -36,7 +36,10 @@ mcp = FastMCP(
         "These tools also serve paper-lookup workflows: after presenting "
         "search results to the user, offer to import some or all of them "
         "(one request for identifier batches; parallel calls for paper-page "
-        "URLs)."
+        "URLs). For batches the user may not keep, ask whether to file them "
+        "into a collection or into a research workspace (staging); recommend "
+        "the workspace for exploratory deep research, and promote/discard at "
+        "the end."
     ),
 )
 
@@ -54,13 +57,14 @@ def _client() -> httpx.AsyncClient:
     )
 
 
-def _summarize_error(response: httpx.Response) -> str:
+def _summarize_error(response: httpx.Response, path: str) -> str:
     try:
         body = response.json()
         detail = body.get("detail") or body.get("title") or body
-        return f"HTTP {response.status_code}: {detail}"
+        return f"HTTP {response.status_code} for {path}: {detail}"
     except Exception:
-        return f"HTTP {response.status_code}"
+        text = (response.text or "").strip()[:300]
+        return f"HTTP {response.status_code} for {path}: {text or 'empty body'}"
 
 
 async def _request(
@@ -71,10 +75,16 @@ async def _request(
     raw: bool = False,
     **kwargs: Any,
 ) -> Any:
-    async with _client() as client:
-        response = await client.request(method, path, headers=headers, **kwargs)
+    try:
+        async with _client() as client:
+            response = await client.request(method, path, headers=headers, **kwargs)
+    except httpx.HTTPError as exc:
+        # Never let an empty exception message reach the agent: without the
+        # method/path/type an import failure is undiagnosable.
+        detail = str(exc) or "no detail"
+        raise RuntimeError(f"{method} {path} failed: {type(exc).__name__}: {detail}") from exc
     if response.status_code >= 400:
-        raise RuntimeError(_summarize_error(response))
+        raise RuntimeError(_summarize_error(response, path))
     if response.status_code == 204 or not response.content:
         return None
     if raw:
@@ -83,7 +93,19 @@ async def _request(
 
 
 def _brief_paper(paper: dict[str, Any]) -> dict[str, Any]:
-    keep = ("id", "citekey", "title", "kind", "year", "venue", "readingStatus", "starred")
+    keep = (
+        "id",
+        "citekey",
+        "title",
+        "kind",
+        "year",
+        "venue",
+        "evaluation",
+        "tags",
+        "collections",
+        "readingStatus",
+        "starred",
+    )
     brief = {key: paper.get(key) for key in keep if key in paper}
     if "venue" in paper and isinstance(paper["venue"], dict):
         brief["venue"] = {
@@ -153,6 +175,7 @@ async def import_paper(
     query: str,
     tags: list[str] | None = None,
     collection_id: str | None = None,
+    workspace_id: str | None = None,
     on_duplicate: str = "link",
 ) -> str:
     """Import one paper into the library (identifier, title, or landing-page URL).
@@ -174,6 +197,8 @@ async def import_paper(
         options["defaultTags"] = tags
     if collection_id:
         options["defaultCollectionId"] = collection_id
+    if workspace_id:
+        options["defaultWorkspaceId"] = workspace_id
     created = await _request(
         "POST", "/v1/imports/identifiers", json={"items": [query], "options": options}
     )
@@ -183,19 +208,90 @@ async def import_paper(
 
 
 @mcp.tool()
-async def import_paper_with_pdf(url: str, filename: str | None = None) -> str:
+async def import_paper_with_pdf(
+    url: str,
+    filename: str | None = None,
+    tags: list[str] | None = None,
+    collection_id: str | None = None,
+    workspace_id: str | None = None,
+) -> str:
     """Import a paper AND its PDF from a landing-page or direct-PDF URL.
 
     Resolves the paper from the page (citation meta tags / title search),
     downloads the first working PDF link on the page, and stores both. When no
     PDF is reachable, the paper is still imported (metadata-only) with a
     warning. Re-running with the same URL links to the existing paper.
+
+    tags/collection_id are applied after the import (the backend import path
+    does not take them yet). To add a PDF to a paper that is already in the
+    library, use attach_pdf instead — it can never create a duplicate entry.
     """
     payload: dict[str, Any] = {"url": url}
     if filename:
         payload["filename"] = filename
     result = await _request("POST", "/v1/imports/pdf-url", json=payload)
+    paper_id = result.get("paperId")
+    if paper_id and (tags or collection_id):
+        await _apply_defaults(paper_id, tags, collection_id)
+        result["tagsApplied"] = tags or []
+        result["collectionApplied"] = collection_id
+    if paper_id and workspace_id:
+        await _request(
+            "POST",
+            f"/v1/workspaces/{workspace_id}/papers",
+            json={"paperRefs": [paper_id]},
+        )
+        result["workspaceId"] = workspace_id
     return json.dumps(result, ensure_ascii=False)
+
+
+async def _apply_defaults(
+    paper_id: str, tags: list[str] | None, collection_id: str | None
+) -> None:
+    if tags:
+        await _request("POST", f"/v1/papers/{paper_id}/tags", json={"paths": tags})
+    if collection_id:
+        await _request(
+            "POST", f"/v1/papers/{paper_id}/collections", json={"collectionIds": [collection_id]}
+        )
+
+
+@mcp.tool()
+async def import_papers(
+    items: list[str],
+    tags: list[str] | None = None,
+    collection_id: str | None = None,
+    workspace_id: str | None = None,
+    on_duplicate: str = "link",
+    timeout_s: float = 180.0,
+) -> str:
+    """Import several papers in ONE job (identifiers, titles, or page URLs).
+
+    Use this instead of calling import_paper in a loop: the backend resolves
+    and dedupes items sequentially inside a single import job, so identifier
+    merges cannot race each other. Accepts up to 100 items; waits for the job
+    and returns per-item statuses.
+    """
+    cleaned = [item.strip() for item in items if item and item.strip()]
+    if not cleaned:
+        return json.dumps({"error": "items is empty"})
+    if len(cleaned) > 100:
+        return json.dumps({"error": "at most 100 items per call"})
+    options: dict[str, Any] = {
+        "onDuplicate": on_duplicate if on_duplicate in {"link", "skip", "create"} else "link"
+    }
+    if tags:
+        options["defaultTags"] = tags
+    if collection_id:
+        options["defaultCollectionId"] = collection_id
+    if workspace_id:
+        options["defaultWorkspaceId"] = workspace_id
+    created = await _request(
+        "POST", "/v1/imports/identifiers", json={"items": cleaned, "options": options}
+    )
+    return json.dumps(
+        await _wait_for_import(created["importId"], timeout_s=timeout_s), ensure_ascii=False
+    )
 
 
 @mcp.tool()
@@ -216,6 +312,75 @@ async def get_paper(ref: str) -> str:
     """Get one paper by id, citekey, or DOI. Includes venue with CCF/CAS
     evaluation, authors, identifiers, files, and reading state."""
     result = await _request("GET", f"/v1/papers/{ref}")
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def update_paper(
+    paper_ref: str,
+    venue_id: str | None = None,
+    title: str | None = None,
+    abstract: str | None = None,
+    year: int | None = None,
+    kind: str | None = None,
+    citekey: str | None = None,
+) -> str:
+    """Correct one paper's metadata in place — the repair path after import.
+
+    Pass only the fields that should change. venue_id (from list_venues) is how
+    a provisional "Proceedings ..." venue is replaced by the canonical
+    conference, which also restores the paper's CCF/CAS evaluation. Note that
+    kind is one of conference/journal/preprint/arxiv/techreport/thesis/book;
+    clearing a field (e.g. abstract) is done by passing an empty string.
+    """
+    payload: dict[str, Any] = {}
+    if venue_id is not None:
+        payload["venueId"] = venue_id
+    if title is not None:
+        payload["title"] = title
+    if abstract is not None:
+        payload["abstract"] = abstract
+    if year is not None:
+        payload["year"] = year
+    if kind is not None:
+        payload["kind"] = kind
+    if citekey is not None:
+        payload["citekey"] = citekey
+    if not payload:
+        return json.dumps({"error": "nothing to update"})
+    result = await _request("PATCH", f"/v1/papers/{paper_ref}", json=payload)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def attach_pdf(paper_ref: str, url: str, filename: str | None = None) -> str:
+    """Attach a PDF to a paper that is already in the library (by direct URL).
+
+    Unlike import_paper_with_pdf, this never creates or resolves a paper, so it
+    cannot produce a duplicate entry. Use it to repair metadata-only imports.
+    """
+    payload: dict[str, Any] = {"url": url}
+    if filename:
+        payload["filename"] = filename
+    result = await _request("POST", f"/v1/papers/{paper_ref}/files/from-url", json=payload)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_files(paper_ref: str) -> str:
+    """List a paper's stored PDFs (id, filename, size, primary, text status)."""
+    result = await _request("GET", f"/v1/papers/{paper_ref}/files")
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def list_venues(q: str, limit: int = 10) -> str:
+    """Search venues (conferences/journals) by name or abbreviation.
+
+    Returns id/fullName/abbrev/kind plus CCF/CAS evaluation when available;
+    pass a returned id to update_paper(venue_id=...) to fix a wrong venue.
+    """
+    result = await _request("GET", "/v1/venues", params={"q": q, "limit": limit})
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -253,6 +418,120 @@ async def list_collections() -> str:
 
 
 @mcp.tool()
+async def list_workspaces(include_closed: bool = False) -> str:
+    """List research workspaces (staging areas) with paper/pending counts.
+
+    A research workspace is a peer of collections/projects, but its papers are
+    NOT in the library yet: they are hidden from list_papers/search until
+    promoted. Use it for batch research the user may not keep.
+    """
+    result = await _request(
+        "GET", "/v1/workspaces", params={"include_closed": include_closed}
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def create_workspace(name: str, description: str | None = None) -> str:
+    """Create a research workspace (staging area) for a batch of papers.
+
+    Propose a descriptive name such as "2026-11 agent-jailbreak survey"; names
+    are unique among open workspaces.
+    """
+    payload: dict[str, Any] = {"name": name}
+    if description:
+        payload["description"] = description
+    result = await _request("POST", "/v1/workspaces", json=payload)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def get_workspace(workspace_id: str, pending_only: bool = False) -> str:
+    """Get a workspace with its papers (citekey/title/year/promoted)."""
+    result = await _request(
+        "GET", f"/v1/workspaces/{workspace_id}", params={"pending_only": pending_only}
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def add_to_workspace(workspace_id: str, paper_refs: list[str]) -> str:
+    """Add existing papers to a workspace and mark them staged (hidden).
+
+    Prefer importing with import_papers(workspace_id=...) for new papers; this
+    is for papers already in the library/staging.
+    """
+    result = await _request(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/papers",
+        json={"paperRefs": paper_refs},
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def promote_workspace_papers(
+    workspace_id: str, paper_refs: list[str], collection_id: str | None = None
+) -> str:
+    """Move papers from staging into the library (optionally into a collection).
+
+    Use after the user has reviewed a research workspace and chosen what to
+    keep. Promoting clears the staged flag so the paper appears in list_papers.
+    """
+    payload: dict[str, Any] = {"paperRefs": paper_refs}
+    if collection_id:
+        payload["collectionId"] = collection_id
+    result = await _request(
+        "POST", f"/v1/workspaces/{workspace_id}/promote", json=payload
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def discard_workspace_papers(workspace_id: str, paper_refs: list[str]) -> str:
+    """Discard papers from a research workspace (staged ones are soft-deleted)."""
+    result = await _request(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/discard",
+        json={"paperRefs": paper_refs},
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def create_collection(
+    name: str, parent_id: str | None = None, description: str | None = None
+) -> str:
+    """Create a collection (file folder) when the user wants a new one.
+
+    Use after the user chooses "keep in a collection" and no existing
+    collection fits (list_collections shows the current tree).
+    """
+    payload: dict[str, Any] = {"name": name}
+    if parent_id:
+        payload["parentId"] = parent_id
+    if description:
+        payload["description"] = description
+    result = await _request("POST", "/v1/collections", json=payload)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def close_workspace(workspace_id: str, discard_unpromoted: bool = False) -> str:
+    """Close a research workspace once its papers are promoted or discarded.
+
+    With discard_unpromoted=True, papers still pending are dropped (staged
+    ones are soft-deleted); promoted papers stay in the library.
+    """
+    result = await _request(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/close",
+        json={"discardUnpromoted": discard_unpromoted},
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
 async def get_import(import_id: str) -> str:
     """Get an import job's status and per-item results (poll while pending)."""
     return json.dumps(await _wait_for_import(import_id, timeout_s=0.1), ensure_ascii=False)
@@ -269,6 +548,8 @@ async def list_papers(
     status: str | None = None,
     starred: bool | None = None,
     unfiled: bool | None = None,
+    workspace_id: str | None = None,
+    include_staged: bool = False,
     limit: int = 20,
     cursor: str | None = None,
 ) -> str:
@@ -295,6 +576,10 @@ async def list_papers(
         params["starred"] = starred
     if unfiled is not None:
         params["unfiled"] = unfiled
+    if workspace_id:
+        params["workspace"] = workspace_id
+    if include_staged:
+        params["includeStaged"] = True
     if cursor:
         params["cursor"] = cursor
     result = await _request("GET", "/v1/papers", params=params)

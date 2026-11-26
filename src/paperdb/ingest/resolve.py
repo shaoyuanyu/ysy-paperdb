@@ -37,6 +37,21 @@ _OPENREVIEW_RE = re.compile(r"openreview\.net/forum\?id=([^&]+)", re.IGNORECASE)
 _DBLP_RE = re.compile(r"dblp\.org/rec/([^?#\s]+)", re.IGNORECASE)
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+\.\S+", re.IGNORECASE)
 
+# Venues that describe the hosting repository rather than the publication.
+# They must never win over a real conference/journal venue carried by another
+# source for the same paper (typically the arXiv twin of a USENIX/NDSS paper).
+_PREPRINT_VENUE_KEYS = {
+    "arxiv",
+    "arxiv org",
+    "arxiv preprint",
+    "ssrn",
+    "biorxiv",
+    "medrxiv",
+    "research square",
+    "techrxiv",
+    "preprints org",
+}
+
 # "page" is always the last resort: landing-page metadata only fills fields
 # the aggregator sources could not provide.
 _SOURCE_ORDER = {
@@ -423,10 +438,35 @@ def _candidate(records: list[SourceRecord], input_kind: str, raw: str) -> Candid
     venue_name = _pick(
         records, "venue", ["dblp", "crossref", "acl", "openreview", "openalex", "s2", "page"]
     )
+    if venue_name and normalize_name(venue_name) in _PREPRINT_VENUE_KEYS:
+        # A preprint-server venue is a property of the *record*, not the paper.
+        # Prefer any source that knows the real venue (DBLP > Crossref > ... >
+        # the landing page's own hint); only then fall back to "arXiv".
+        for source in order:
+            record = next((item for item in records if item.source == source), None)
+            if record is None or not record.venue:
+                continue
+            if normalize_name(record.venue) not in _PREPRINT_VENUE_KEYS:
+                venue_name = record.venue
+                break
     dblp_venue_key = _pick(records, "dblp_venue_key", order)
     edition_key = _pick(records, "dblp_edition_key", order)
     page_record = next((record for record in records if record.source == "page"), None)
     pdf_urls = list((page_record.raw or {}).get("pdf_urls") or []) if page_record else []
+    if not pdf_urls:
+        # A URL that is just an arXiv/ACL identifier has no landing-page record,
+        # so derive the open-access PDF from the identifier instead of silently
+        # importing metadata only.
+        arxiv_id = next(
+            (str(item["value"]) for item in identifiers if item["scheme"] == "arxiv"), None
+        )
+        acl_id = next(
+            (str(item["value"]) for item in identifiers if item["scheme"] == "acl"), None
+        )
+        if arxiv_id:
+            pdf_urls.append(f"https://arxiv.org/pdf/{arxiv_id}")
+        elif acl_id:
+            pdf_urls.append(f"https://aclanthology.org/{acl_id}.pdf")
     return Candidate(
         confidence=0.0,
         sources=list(dict.fromkeys(record.source for record in records)),

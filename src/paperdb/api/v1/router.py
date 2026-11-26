@@ -17,6 +17,7 @@ from paperdb.api.v1 import (
     tokens,
     venues,
     views,
+    workspaces,
 )
 
 api_router = APIRouter(prefix="/v1")
@@ -32,6 +33,7 @@ api_router.include_router(collections.router)
 api_router.include_router(tags.router)
 api_router.include_router(views.router)
 api_router.include_router(projects.router)
+api_router.include_router(workspaces.router)
 api_router.include_router(rules.router)
 api_router.include_router(files.router)
 api_router.include_router(annotations.router)

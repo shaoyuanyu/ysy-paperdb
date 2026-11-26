@@ -30,6 +30,7 @@ async def create_file(
     data: bytes,
     filename: str | None,
     settings: Settings,
+    source_url: str | None = None,
 ) -> tuple[PdfFile, uuid.UUID | None]:
     if not data.startswith(b"%PDF-"):
         raise ApiError(415, "unsupported_media_type", "Only PDF uploads are accepted")
@@ -62,6 +63,7 @@ async def create_file(
         byte_size=stored.byte_size,
         mime="application/pdf",
         original_filename=filename,
+        source_url=source_url,
         is_primary=has_primary is None,
         text_status=PdfTextStatus.pending,
     )
@@ -226,6 +228,7 @@ async def search_pages(
     *,
     file_id: uuid.UUID | None = None,
     limit: int = 20,
+    include_staged: bool = False,
 ) -> list[dict[str, Any]]:
     query = query.strip()
     if not query:
@@ -246,6 +249,9 @@ async def search_pages(
     )
     if file_id is not None:
         stmt = stmt.where(PdfPageText.pdf_file_id == file_id)
+    elif not include_staged:
+        # Library-wide search must not surface staging-area papers.
+        stmt = stmt.where(Paper.staged.is_(False))
     rows = (await session.execute(stmt.limit(limit))).all()
     return [
         {

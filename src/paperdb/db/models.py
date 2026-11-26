@@ -366,6 +366,7 @@ class Paper(UUIDPrimaryKey, Timestamped, Base):
         Index("ix_paper_venue_year", "venue_id", "year"),
         Index("ix_paper_edition", "venue_edition_id"),
         Index("ix_paper_created_at_id", "created_at", "id"),
+        Index("ix_paper_staged", "staged", postgresql_where=text("staged")),
     )
 
     kind: Mapped[PaperKind] = mapped_column(_enum(PaperKind, "paper_kind", 16), nullable=False)
@@ -389,6 +390,9 @@ class Paper(UUIDPrimaryKey, Timestamped, Base):
     user_locked_fields: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list, nullable=False)
     citations_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # True while the paper lives only in a research workspace: it is not part
+    # of the library yet and is hidden from the default listing/search.
+    staged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     venue: Mapped[Venue | None] = relationship(foreign_keys=[venue_id])
@@ -794,6 +798,53 @@ class ProjectPaper(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="papers")
+
+
+class ResearchWorkspace(UUIDPrimaryKey, Timestamped, Base):
+    """Staging area for batch research whose results may not be kept.
+
+    Peer of projects and collections, but its papers are *staged*: hidden from
+    the library until promoted. Closing a workspace keeps the record.
+    """
+
+    __tablename__ = "research_workspace"
+    __table_args__ = (
+        Index(
+            "uq_research_workspace_name_active",
+            "name",
+            unique=True,
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+    )
+
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    papers: Mapped[list[ResearchWorkspacePaper]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+
+class ResearchWorkspacePaper(Base):
+    __tablename__ = "research_workspace_paper"
+    __table_args__ = (
+        Index("ix_research_workspace_paper_paper", "paper_id"),
+        Index("ix_research_workspace_paper_position", "workspace_id", "position"),
+    )
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("research_workspace.id"), primary_key=True
+    )
+    paper_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("paper.id"), primary_key=True)
+    position: Mapped[int | None] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text)
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    workspace: Mapped[ResearchWorkspace] = relationship(back_populates="papers")
 
 
 class PdfFile(UUIDPrimaryKey, Base):

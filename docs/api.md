@@ -314,7 +314,7 @@ If-Match: "3"            # 可选，乐观锁
 |---|---|---|---|
 | POST | `/v1/resolve` | W | 只读预览：输入 DOI/arXiv/URL/标题，返回候选与冲突 |
 | POST | `/v1/papers` | W | 创建（可直接用 resolve 结果） |
-| GET | `/v1/papers` | R | 列表/搜索/视图 |
+| GET | `/v1/papers` | R | 列表/搜索/视图；默认排除调研工作区中暂存的论文（`includeStaged=true` 或 `workspace=<id>` 可指定） |
 | GET | `/v1/papers/{id}` | R | 详情（uuid 或 citekey） |
 | PATCH | `/v1/papers/{id}` | W | 局部更新 |
 | DELETE | `/v1/papers/{id}` | W | 软删 |
@@ -552,6 +552,25 @@ If-Match: "3"            # 可选，乐观锁
 | GET | `/v1/projects/{id}/papers` | R | 并集分页（含子集合） |
 | POST | `/v1/projects/{id}/export-tokens` | X | 创建该项目的 `.bib` token |
 
+### 5.8a 调研工作区（Research workspace，暂存区）
+
+批量调研的落点：工作区里的论文 `paper.staged=true`，默认不出现在文献库列表/搜索/`.bib` 导出中；
+调研结束后逐篇 promote（转入文献库，可同时加入集合）或 discard（软删）。
+
+| 方法 | 路径 | Scope | 说明 |
+|---|---|---|---|
+| GET | `/v1/workspaces` | R | 打开的工作区 + 计数（`include_closed=true` 含已关闭） |
+| POST | `/v1/workspaces` | O | `{name, description?}`；打开状态下名称唯一 |
+| GET | `/v1/workspaces/{id}` | R | 详情 + 论文（`pending_only`、`limit`） |
+| PATCH | `/v1/workspaces/{id}` | O | `{name?, description?}` |
+| GET | `/v1/workspaces/{id}/papers` | R | 紧凑论文列表 |
+| POST | `/v1/workspaces/{id}/papers` | O | `{paperRefs[]}` 暂存（staged） |
+| POST | `/v1/workspaces/{id}/promote` | O | `{paperRefs[], collectionId?}` 转入文献库 |
+| POST | `/v1/workspaces/{id}/discard` | O | `{paperRefs[]}` 丢弃（暂存论文软删） |
+| POST | `/v1/workspaces/{id}/close` | O | `{discardUnpromoted?}` 关闭工作区 |
+
+导入时通过 `options.defaultWorkspaceId` 直接落入工作区（论文创建即 staged）；已存在于文献库的论文不会被隐藏。
+
 ### 5.9 阅读状态与批量
 
 | 方法 | 路径 | Scope | 说明 |
@@ -589,6 +608,7 @@ If-Match: "3"            # 可选，乐观锁
 | 方法 | 路径 | Scope | 说明 |
 |---|---|---|---|
 | POST | `/v1/papers/{id}/files` | P | multipart，字段 `file`、`isPrimary?` |
+| POST | `/v1/papers/{id}/files/from-url` | P | JSON `{url, filename?}`；服务端下载 PDF 挂到该论文（不改元数据，不会新建条目） |
 | GET | `/v1/papers/{id}/files` | P | 文件列表 |
 | GET | `/v1/files/{fileId}` | P | 元数据 |
 | GET | `/v1/files/{fileId}/content` | P | PDF 字节，支持 `Range` |

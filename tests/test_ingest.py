@@ -830,3 +830,67 @@ async def test_import_identifier_duplicate_merges_new_identifiers(
     }
     assert ("arxiv", "2601.08888") in values
     assert ("doi", doi) in values
+
+
+async def test_suggest_venue_matches_proceedings_title(db_session) -> None:
+    """Crossref/publisher proceedings titles must resolve to the canonical venue."""
+    from paperdb.ingest.venue_resolve import suggest_venue
+
+    ndss = await suggest_venue(
+        db_session,
+        raw_name="Proceedings 2026 Network and Distributed System Security Symposium",
+        kind="conference",
+        year=2026,
+    )
+    assert ndss is not None
+    assert ndss.abbrev == "NDSS"
+
+    ccs = await suggest_venue(
+        db_session,
+        raw_name=(
+            "Proceedings of the 2024 on ACM SIGSAC Conference on Computer and "
+            "Communications Security"
+        ),
+        kind="conference",
+        year=2024,
+    )
+    assert ccs is not None
+    assert ccs.abbrev == "CCS"
+
+
+def test_candidate_prefers_real_venue_over_preprint() -> None:
+    """An arXiv-twin record must not hide the published venue."""
+    from paperdb.ingest.resolve import _candidate
+    from paperdb.ingest.types import SourceRecord
+
+    records = [
+        SourceRecord(source="openalex", title="A Paper", year=2025, venue="arXiv"),
+        SourceRecord(
+            source="page", title="A Paper", year=2025, venue="USENIX Security Symposium"
+        ),
+    ]
+    candidate = _candidate(records, "url", "https://www.usenix.org/conference/x")
+    assert candidate is not None
+    assert candidate._venue_name == "USENIX Security Symposium"
+
+
+def test_candidate_derives_pdf_url_from_identifier() -> None:
+    """arXiv/ACL inputs have no landing page; the OA PDF must still be found."""
+    from paperdb.ingest.resolve import _candidate
+    from paperdb.ingest.types import SourceRecord
+
+    arxiv = _candidate(
+        [SourceRecord(source="arxiv", title="A Paper", year=2026, arxiv="2601.14340")],
+        "arxiv",
+        "arXiv:2601.14340",
+    )
+    assert arxiv is not None
+    assert arxiv.pdf_urls == ["https://arxiv.org/pdf/2601.14340"]
+
+    acl = _candidate(
+        [SourceRecord(source="acl", title="A Paper", year=2026, acl_id="2026.acl-long.1")],
+        "acl",
+        "https://aclanthology.org/2026.acl-long.1/",
+    )
+    assert acl is not None
+    assert acl.pdf_urls == ["https://aclanthology.org/2026.acl-long.1.pdf"]
