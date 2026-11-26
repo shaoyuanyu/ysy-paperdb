@@ -20,7 +20,7 @@ podman exec paperdb-pg createdb -U paperdb paperdb_test || true
 
 # 2. Python env
 cp .env.example .env
-UV_CACHE_DIR=$PWD/.uv-cache UV_PYTHON_INSTALL_DIR=$PWD/.uv-python uv sync --extra dev
+UV_CACHE_DIR=$PWD/.uv-cache UV_PYTHON_INSTALL_DIR=$PWD/.uv-python uv sync --extra dev --extra mcp
 
 # 3. Schema + datasets
 UV_CACHE_DIR=$PWD/.uv-cache uv run alembic upgrade head

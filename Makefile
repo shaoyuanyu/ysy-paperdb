@@ -4,7 +4,7 @@ UV_ENV = UV_CACHE_DIR=$(CURDIR)/.uv-cache UV_PYTHON_INSTALL_DIR=$(CURDIR)/.uv-py
 .PHONY: sync test lint format typecheck migrate import-ccf import-cas run
 
 sync:
-	$(UV_ENV) $(UV) sync --extra dev
+	$(UV_ENV) $(UV) sync --extra dev --extra mcp
 
 test:
 	$(UV_ENV) $(UV) run pytest -q
