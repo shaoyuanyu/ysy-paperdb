@@ -173,3 +173,46 @@ async def test_bad_cursor(client: httpx.AsyncClient) -> None:
     response = await client.get("/v1/papers", params={"cursor": "not-a-cursor"}, headers=SERVICE)
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_cursor"
+
+
+async def test_sort_modes_and_q_filter(client: httpx.AsyncClient) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    for title, year in [
+        (f"Zeta Sort {suffix}", 2021),
+        (f"Alpha Sort {suffix}", 2023),
+        (f"Mu Sort {suffix}", 2022),
+    ]:
+        response = await client.post(
+            "/v1/papers",
+            headers=SERVICE,
+            json={"kind": "preprint", "title": title, "year": year},
+        )
+        assert response.status_code == 201, response.text
+
+    by_title = await client.get(
+        "/v1/papers",
+        params={"q": suffix, "sort": "title", "limit": 10},
+        headers=SERVICE,
+    )
+    assert by_title.status_code == 200, by_title.text
+    titles = [item["title"] for item in by_title.json()["items"]]
+    assert titles == sorted(titles, key=str.lower)
+
+    by_year = await client.get(
+        "/v1/papers",
+        params={"q": suffix, "sort": "year", "limit": 10},
+        headers=SERVICE,
+    )
+    years = [item["year"] for item in by_year.json()["items"]]
+    assert years == sorted(years, reverse=True)
+
+    q_filter = await client.get(
+        "/v1/papers",
+        params={"q": f"Alpha Sort {suffix}", "limit": 10},
+        headers=SERVICE,
+    )
+    assert [item["year"] for item in q_filter.json()["items"]] == [2023]
+
+    invalid = await client.get("/v1/papers", params={"sort": "nope"}, headers=SERVICE)
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == "invalid_sort"

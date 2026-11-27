@@ -14,6 +14,7 @@ from paperdb.api.schemas import (
     ImportIdentifiersRequest,
     ImportItemOut,
     ImportJobOut,
+    ImportOptions,
     PaperAuthorInput,
     PaperCreate,
 )
@@ -402,6 +403,7 @@ async def create_bibtex_import_job(
     text: str,
     *,
     token_id: str | None = None,
+    options: ImportOptions | None = None,
 ) -> tuple[ImportJob, uuid.UUID]:
     try:
         entries = parse_bibtex(text)
@@ -411,11 +413,24 @@ async def create_bibtex_import_job(
         raise ApiError(422, "invalid_bibtex", "No BibTeX entries found")
     if len(entries) > 500:
         raise ApiError(422, "too_many_entries", "At most 500 entries per import")
+    options = options or ImportOptions()
     import_job = ImportJob(
         id=uuid.uuid4(),
         kind=ImportKind.bibtex,
         status=JobStatus.pending,
-        input={"entries": len(entries)},
+        input={
+            "entries": len(entries),
+            "options": {
+                "onDuplicate": options.on_duplicate,
+                "defaultTags": options.default_tags,
+                "defaultCollectionId": (
+                    str(options.default_collection_id) if options.default_collection_id else None
+                ),
+                "defaultWorkspaceId": (
+                    str(options.default_workspace_id) if options.default_workspace_id else None
+                ),
+            },
+        },
         stats={},
         created_by_token_id=uuid.UUID(token_id) if token_id else None,
     )

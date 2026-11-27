@@ -85,3 +85,52 @@ async def test_paper_scoped_export(client: httpx.AsyncClient) -> None:
     body = (await client.get(path)).text
     assert paper["citekey"] in body
     assert body.count("@inproceedings") == 1
+
+
+async def test_collection_and_project_scoped_export(client: httpx.AsyncClient) -> None:
+    paper = await _create_paper(client)
+    suffix = uuid.uuid4().hex[:8]
+    collection = await client.post(
+        "/v1/collections", headers=SERVICE, json={"name": f"Export Collection {suffix}"}
+    )
+    assert collection.status_code == 201, collection.text
+    collection_id = collection.json()["id"]
+    added = await client.post(
+        f"/v1/collections/{collection_id}/papers",
+        headers=SERVICE,
+        json={"paperIds": [paper["id"]]},
+    )
+    assert added.status_code == 200, added.text
+    project = await client.post(
+        "/v1/projects", headers=SERVICE, json={"name": f"Export Project {suffix}"}
+    )
+    assert project.status_code == 201, project.text
+    project_id = project.json()["id"]
+    pinned = await client.post(
+        f"/v1/projects/{project_id}/papers",
+        headers=SERVICE,
+        json={"paperIds": [paper["id"]]},
+    )
+    assert pinned.status_code == 200, pinned.text
+
+    for scope_type, scope_id in [
+        ("collection", collection_id),
+        ("project", project_id),
+    ]:
+        created = await client.post(
+            "/v1/export-tokens",
+            headers=SERVICE,
+            json={
+                "name": f"pytest-{scope_type}",
+                "scopeType": scope_type,
+                "scopeId": scope_id,
+            },
+        )
+        assert created.status_code == 201, created.text
+        data = created.json()
+        path = data["url"].split("127.0.0.1:9720", 1)[-1]
+        fetched = await client.get(path)
+        assert fetched.status_code == 200, fetched.text
+        assert paper["citekey"] in fetched.text
+        revoked = await client.delete(f"/v1/export-tokens/{data['id']}", headers=SERVICE)
+        assert revoked.status_code == 204

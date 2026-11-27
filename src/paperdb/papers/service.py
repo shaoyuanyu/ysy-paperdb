@@ -599,21 +599,43 @@ def paper_to_detail(
     return data
 
 
-def encode_cursor(created_at: datetime, paper_id: uuid.UUID) -> str:
-    payload = {"createdAt": created_at.isoformat(), "id": str(paper_id)}
-    raw = json.dumps(payload, separators=(",", ":")).encode()
+def encode_cursor(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+def decode_cursor(cursor: str) -> dict[str, Any]:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded))
-        created_at = datetime.fromisoformat(payload["createdAt"])
-        paper_id = uuid.UUID(payload["id"])
+        if not isinstance(payload, dict):
+            raise TypeError("cursor payload must be an object")
+        return payload
     except Exception as exc:
         raise ApiError(400, "invalid_cursor", "Invalid cursor") from exc
-    return created_at, paper_id
+
+
+def _cursor_payload(paper: Paper, sort: str) -> dict[str, Any]:
+    if sort == "title":
+        return {"sort": "title", "title": paper.title.lower(), "id": str(paper.id)}
+    if sort == "year":
+        return {
+            "sort": "year",
+            "year": paper.year,
+            "createdAt": paper.created_at.isoformat(),
+            "id": str(paper.id),
+        }
+    if sort == "updated":
+        return {
+            "sort": "updated",
+            "updatedAt": paper.updated_at.isoformat(),
+            "id": str(paper.id),
+        }
+    return {
+        "sort": "added",
+        "createdAt": paper.created_at.isoformat(),
+        "id": str(paper.id),
+    }
 
 
 async def list_papers(
@@ -633,8 +655,12 @@ async def list_papers(
     cursor: str | None,
     include_staged: bool = False,
     workspace_id: uuid.UUID | None = None,
+    paper_ids: list[uuid.UUID] | None = None,
+    sort: str = "added",
 ) -> tuple[list[Paper], str | None, bool]:
     stmt: Select = select(Paper).options(*PAPER_OPTIONS).where(Paper.deleted_at.is_(None))
+    if paper_ids is not None:
+        stmt = stmt.where(Paper.id.in_(paper_ids))
     if workspace_id is not None:
         from paperdb.db.models import ResearchWorkspacePaper
 
@@ -687,19 +713,78 @@ async def list_papers(
     elif starred is False:
         stmt = stmt.where(Paper.state.has(PaperState.starred_at.is_(None)))
 
+    if sort not in {"added", "year", "title", "updated"}:
+        raise ApiError(422, "invalid_sort", "sort must be added/year/title/updated")
+
     if cursor:
-        created_at, paper_id = decode_cursor(cursor)
-        stmt = stmt.where(
-            or_(
-                Paper.created_at < created_at,
-                and_(Paper.created_at == created_at, Paper.id < paper_id),
-            )
-        )
-    stmt = stmt.order_by(Paper.created_at.desc(), Paper.id.desc()).limit(limit + 1)
+        payload = decode_cursor(cursor)
+        if payload.get("sort", "added") != sort:
+            raise ApiError(400, "invalid_cursor", "Cursor does not match sort")
+        try:
+            if sort == "title":
+                title = str(payload["title"])
+                paper_id = uuid.UUID(payload["id"])
+                stmt = stmt.where(
+                    or_(
+                        func.lower(Paper.title) > title,
+                        and_(func.lower(Paper.title) == title, Paper.id > paper_id),
+                    )
+                )
+            elif sort == "year":
+                year_value = int(payload["year"])
+                created_at = datetime.fromisoformat(payload["createdAt"])
+                paper_id = uuid.UUID(payload["id"])
+                stmt = stmt.where(
+                    or_(
+                        Paper.year < year_value,
+                        and_(
+                            Paper.year == year_value,
+                            or_(
+                                Paper.created_at < created_at,
+                                and_(
+                                    Paper.created_at == created_at,
+                                    Paper.id < paper_id,
+                                ),
+                            ),
+                        ),
+                    )
+                )
+            elif sort == "updated":
+                updated_at = datetime.fromisoformat(payload["updatedAt"])
+                paper_id = uuid.UUID(payload["id"])
+                stmt = stmt.where(
+                    or_(
+                        Paper.updated_at < updated_at,
+                        and_(Paper.updated_at == updated_at, Paper.id < paper_id),
+                    )
+                )
+            else:
+                created_at = datetime.fromisoformat(payload["createdAt"])
+                paper_id = uuid.UUID(payload["id"])
+                stmt = stmt.where(
+                    or_(
+                        Paper.created_at < created_at,
+                        and_(Paper.created_at == created_at, Paper.id < paper_id),
+                    )
+                )
+        except ApiError:
+            raise
+        except Exception as exc:
+            raise ApiError(400, "invalid_cursor", "Invalid cursor") from exc
+
+    if sort == "title":
+        stmt = stmt.order_by(func.lower(Paper.title).asc(), Paper.id.asc())
+    elif sort == "year":
+        stmt = stmt.order_by(Paper.year.desc(), Paper.created_at.desc(), Paper.id.desc())
+    elif sort == "updated":
+        stmt = stmt.order_by(Paper.updated_at.desc(), Paper.id.desc())
+    else:
+        stmt = stmt.order_by(Paper.created_at.desc(), Paper.id.desc())
+    stmt = stmt.limit(limit + 1)
     rows = list((await session.scalars(stmt)).all())
     has_more = len(rows) > limit
     items = rows[:limit]
-    next_cursor = encode_cursor(items[-1].created_at, items[-1].id) if has_more and items else None
+    next_cursor = encode_cursor(_cursor_payload(items[-1], sort)) if has_more and items else None
     return items, next_cursor, has_more
 
 

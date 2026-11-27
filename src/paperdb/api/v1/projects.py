@@ -32,7 +32,9 @@ from paperdb.organize.projects import (
     remove_papers,
     update_project,
 )
-from paperdb.papers.service import PAPER_OPTIONS, paper_to_summary, ranks_for_venues
+from paperdb.papers.bibtex import render_bibtex, safe_filename
+from paperdb.papers.service import PAPER_OPTIONS, list_papers, paper_to_summary, ranks_for_venues
+from paperdb.pdf.service import media_counts
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -167,25 +169,73 @@ async def remove_papers_endpoint(
 @router.get("/{project_id}/papers", response_model=PaperPage)
 async def papers_endpoint(
     project_id: uuid.UUID,
-    limit: int = Query(default=20, ge=1, le=100),
+    q: str | None = Query(default=None, max_length=200),
+    year: int | None = Query(default=None, ge=1900, le=2100),
+    kind: str | None = None,
+    collection_id: uuid.UUID | None = Query(default=None, alias="collection"),
+    tag_path: str | None = Query(default=None, alias="tag"),
+    reading_status: str | None = Query(default=None, alias="status"),
+    starred: bool | None = None,
+    unfiled: bool | None = None,
+    sort: str = Query(default="added"),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = None,
     principal: TokenPrincipal = Depends(scoped("papers:read")),
     session: AsyncSession = Depends(get_session),
 ) -> PaperPage:
     project = await get_project(session, project_id)
     ids = await project_paper_ids(session, project)
-    rows = list(
+    papers, next_cursor, has_more = await list_papers(
+        session,
+        q=q,
+        year=year,
+        kind=kind,
+        venue_id=None,
+        collection_id=collection_id,
+        tag_path=tag_path,
+        status=reading_status,
+        starred=starred,
+        unfiled=unfiled,
+        filter_payload=None,
+        limit=limit,
+        cursor=cursor,
+        paper_ids=ids,
+        sort=sort,
+    )
+    ranks = await ranks_for_venues(session, [paper.venue_id for paper in papers if paper.venue_id])
+    media = await media_counts(session, [paper.id for paper in papers])
+    return PaperPage(
+        items=[
+            PaperSummary.model_validate(paper_to_summary(paper, ranks, media.get(paper.id)))
+            for paper in papers
+        ],
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
+@router.get("/{project_id}/bibtex")
+async def project_bibtex_endpoint(
+    project_id: uuid.UUID,
+    principal: TokenPrincipal = Depends(scoped("papers:read")),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    project = await get_project(session, project_id)
+    ids = await project_paper_ids(session, project)
+    papers = list(
         (
             await session.scalars(
                 select(Paper)
                 .options(*PAPER_OPTIONS)
                 .where(Paper.id.in_(ids), Paper.deleted_at.is_(None))
-                .order_by(Paper.created_at.desc())
-                .limit(limit)
+                .order_by(Paper.year.desc(), Paper.created_at.desc())
             )
         ).all()
     )
-    ranks = await ranks_for_venues(session, [paper.venue_id for paper in rows if paper.venue_id])
-    return PaperPage(
-        items=[PaperSummary.model_validate(paper_to_summary(paper, ranks)) for paper in rows],
-        has_more=len(ids) > len(rows),
+    body = render_bibtex(papers, include_abstract=project.export_include_abstract)
+    filename = f"{safe_filename(project.name)}.bib"
+    return Response(
+        content=body,
+        media_type="application/x-bibtex; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

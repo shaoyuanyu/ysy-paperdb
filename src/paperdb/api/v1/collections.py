@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, Query, Response, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.api.deps import require_totp, scoped
@@ -14,17 +15,21 @@ from paperdb.api.schemas import (
     CollectionUpdate,
 )
 from paperdb.auth.tokens import TokenPrincipal
+from paperdb.db.models import Collection, Paper
 from paperdb.db.session import get_session
 from paperdb.organize.collections import (
     add_papers,
     collection_tree,
     create_collection,
     delete_collection,
+    descendant_ids,
     get_collection,
     move_collection,
     reorder_papers,
     update_collection,
 )
+from paperdb.papers.bibtex import render_bibtex, safe_filename
+from paperdb.papers.service import PAPER_OPTIONS
 
 router = APIRouter(prefix="/collections", tags=["collections"])
 
@@ -162,3 +167,34 @@ async def reorder_endpoint(
     await reorder_papers(session, collection, payload.paper_ids)
     await session.commit()
     return {"ok": True}
+
+
+@router.get("/{collection_id}/bibtex")
+async def collection_bibtex_endpoint(
+    collection_id: uuid.UUID,
+    principal: TokenPrincipal = Depends(scoped("papers:read")),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    collection = await get_collection(session, collection_id)
+    ids = [collection.id, *await descendant_ids(session, collection.id)]
+    papers = list(
+        (
+            await session.scalars(
+                select(Paper)
+                .options(*PAPER_OPTIONS)
+                .where(
+                    Paper.deleted_at.is_(None),
+                    Paper.staged.is_(False),
+                    Paper.collections.any(Collection.id.in_(ids)),
+                )
+                .order_by(Paper.year.desc(), Paper.created_at.desc())
+            )
+        ).all()
+    )
+    body = render_bibtex(papers)
+    filename = f"{safe_filename(collection.name)}.bib"
+    return Response(
+        content=body,
+        media_type="application/x-bibtex; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -149,3 +149,57 @@ async def test_bulk_patch(client: httpx.AsyncClient) -> None:
     assert collection_id in fetched["collections"]
     assert fetched["state"]["status"] == "read"
     assert fetched["state"]["rating"] == 4
+
+
+async def test_project_paper_filters(client: httpx.AsyncClient) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    title = f"Project Filter {suffix}"
+    paper = await _paper(client, title)
+    collection = await client.post(
+        "/v1/collections",
+        headers=SERVICE,
+        json={"name": f"Project Filter Collection {suffix}"},
+    )
+    assert collection.status_code == 201, collection.text
+    collection_id = collection.json()["id"]
+    linked = await client.post(
+        f"/v1/collections/{collection_id}/papers",
+        headers=SERVICE,
+        json={"paperIds": [paper["id"]]},
+    )
+    assert linked.status_code == 200, linked.text
+    project = await client.post(
+        "/v1/projects", headers=SERVICE, json={"name": f"Filter Project {suffix}"}
+    )
+    assert project.status_code == 201, project.text
+    project_id = project.json()["id"]
+    associated = await client.post(
+        f"/v1/projects/{project_id}/collections",
+        headers=SERVICE,
+        json={"collectionIds": [collection_id]},
+    )
+    assert associated.status_code == 200, associated.text
+
+    matched = await client.get(
+        f"/v1/projects/{project_id}/papers",
+        params={"q": suffix},
+        headers=SERVICE,
+    )
+    assert matched.status_code == 200, matched.text
+    assert [item["id"] for item in matched.json()["items"]] == [paper["id"]]
+
+    missing = await client.get(
+        f"/v1/projects/{project_id}/papers",
+        params={"q": "definitely-not-matching"},
+        headers=SERVICE,
+    )
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["items"] == []
+
+    unread = await client.get(
+        f"/v1/projects/{project_id}/papers",
+        params={"status": "read"},
+        headers=SERVICE,
+    )
+    assert unread.status_code == 200, unread.text
+    assert unread.json()["items"] == []

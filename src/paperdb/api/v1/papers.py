@@ -32,6 +32,7 @@ from paperdb.auth.tokens import TokenPrincipal
 from paperdb.db.models import (
     Collection,
     CollectionPaper,
+    Paper,
     PaperState,
     PaperTag,
     ReadingStatus,
@@ -43,6 +44,7 @@ from paperdb.jobs.queue import enqueue
 from paperdb.organize.tags import ensure_tag_path
 from paperdb.papers.bibtex import generate_bibtex
 from paperdb.papers.service import (
+    PAPER_OPTIONS,
     create_paper,
     delete_paper,
     find_duplicates,
@@ -82,6 +84,7 @@ async def list_endpoint(
     unfiled: bool | None = None,
     filter_param: str | None = Query(default=None, alias="filter"),
     view_id: uuid.UUID | None = Query(default=None, alias="view"),
+    sort: str = Query(default="added"),
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = None,
     principal: TokenPrincipal = Depends(scoped("papers:read")),
@@ -115,6 +118,7 @@ async def list_endpoint(
         filter_payload=filter_payload,
         limit=limit,
         cursor=cursor,
+        sort=sort,
     )
     ranks = await ranks_for_venues(session, [paper.venue_id for paper in papers if paper.venue_id])
     media = await media_counts(session, [paper.id for paper in papers])
@@ -125,6 +129,34 @@ async def list_endpoint(
         ],
         next_cursor=next_cursor,
         has_more=has_more,
+    )
+
+
+@router.get("/trash", response_model=PaperPage)
+async def trash_endpoint(
+    limit: int = Query(default=100, ge=1, le=200),
+    principal: TokenPrincipal = Depends(scoped("papers:read")),
+    session: AsyncSession = Depends(get_session),
+) -> PaperPage:
+    rows = list(
+        (
+            await session.scalars(
+                select(Paper)
+                .options(*PAPER_OPTIONS)
+                .where(Paper.deleted_at.is_not(None))
+                .order_by(Paper.deleted_at.desc())
+                .limit(limit)
+            )
+        ).all()
+    )
+    ranks = await ranks_for_venues(session, [paper.venue_id for paper in rows if paper.venue_id])
+    media = await media_counts(session, [paper.id for paper in rows])
+    return PaperPage(
+        items=[
+            PaperSummary.model_validate(paper_to_summary(paper, ranks, media.get(paper.id)))
+            for paper in rows
+        ],
+        has_more=False,
     )
 
 

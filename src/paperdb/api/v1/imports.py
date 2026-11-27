@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,6 +16,7 @@ from paperdb.api.schemas import (
     ImportIdentifiersRequest,
     ImportItemOut,
     ImportJobOut,
+    ImportOptions,
     ImportPage,
     JobOut,
     PdfImportCreated,
@@ -199,6 +200,7 @@ async def import_pdf_url_endpoint(
 )
 async def create_bibtex_import_endpoint(
     file: UploadFile = File(...),
+    options: str | None = Form(default=None),
     principal: TokenPrincipal = Depends(scoped("papers:write")),
     session: AsyncSession = Depends(get_session),
 ) -> ImportCreated:
@@ -206,7 +208,15 @@ async def create_bibtex_import_endpoint(
     if len(raw) > 5 * 1024 * 1024:
         raise ApiError(413, "payload_too_large", "BibTeX file is too large")
     text = raw.decode("utf-8", errors="replace")
-    import_job, job_id = await create_bibtex_import_job(session, text, token_id=principal.token_id)
+    parsed: ImportOptions | None = None
+    if options:
+        try:
+            parsed = ImportOptions.model_validate_json(options)
+        except Exception as exc:
+            raise ApiError(422, "invalid_options", "options must be ImportOptions JSON") from exc
+    import_job, job_id = await create_bibtex_import_job(
+        session, text, token_id=principal.token_id, options=parsed
+    )
     await session.commit()
     return ImportCreated(
         import_id=import_job.id,

@@ -12,10 +12,12 @@ from paperdb.api.deps import scoped
 from paperdb.api.schemas import ExportTokenCreate, ExportTokenCreated, ExportTokenOut
 from paperdb.auth.tokens import TokenPrincipal, create_export_token
 from paperdb.config import Settings, get_settings
-from paperdb.db.models import ExportToken, Paper
+from paperdb.db.models import Collection, ExportToken, Paper
 from paperdb.db.session import get_session
 from paperdb.errors import ApiError
 from paperdb.exports import authenticate_export_token
+from paperdb.organize.collections import descendant_ids
+from paperdb.organize.projects import get_project, project_paper_ids
 from paperdb.papers.bibtex import render_bibtex
 from paperdb.papers.service import PAPER_OPTIONS
 
@@ -33,18 +35,25 @@ async def create_export_link(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> ExportTokenCreated:
-    if payload.scope_type not in {"library", "paper"}:
+    if payload.scope_type not in {"library", "paper", "collection", "project"}:
         raise ApiError(
             422,
             "unsupported_scope",
-            "M1 supports library/paper export scopes",
+            "scopeType must be library/paper/collection/project",
         )
+    if payload.scope_type != "library" and payload.scope_id is None:
+        raise ApiError(422, "scope_id_required", "scopeId is required for this scope")
     if payload.scope_type == "paper":
-        if payload.scope_id is None:
-            raise ApiError(422, "scope_id_required", "paper export needs scopeId")
         paper = await session.get(Paper, payload.scope_id)
         if paper is None or paper.deleted_at is not None:
             raise ApiError(404, "not_found", "Paper not found")
+    elif payload.scope_type == "collection":
+        collection = await session.get(Collection, payload.scope_id)
+        if collection is None or collection.deleted_at is not None:
+            raise ApiError(404, "not_found", "Collection not found")
+    elif payload.scope_type == "project":
+        assert payload.scope_id is not None
+        await get_project(session, payload.scope_id)
     plaintext, prefix, token_hash = create_export_token(payload.name, settings.token_pepper)
     record = ExportToken(
         name=payload.name,
@@ -122,6 +131,20 @@ async def export_bib(
     stmt = select(Paper).options(*PAPER_OPTIONS).where(Paper.deleted_at.is_(None))
     if record.scope_type == "paper":
         stmt = stmt.where(Paper.id == record.scope_id)
+    elif record.scope_type == "collection":
+        collection = await session.get(Collection, record.scope_id)
+        if collection is None or collection.deleted_at is not None:
+            raise ApiError(404, "not_found", "Export link not found")
+        ids = [collection.id, *await descendant_ids(session, collection.id)]
+        stmt = stmt.where(Paper.collections.any(Collection.id.in_(ids)), Paper.staged.is_(False))
+    elif record.scope_type == "project":
+        assert record.scope_id is not None
+        try:
+            project = await get_project(session, record.scope_id)
+        except ApiError:
+            raise ApiError(404, "not_found", "Export link not found") from None
+        ids = await project_paper_ids(session, project)
+        stmt = stmt.where(Paper.id.in_(ids), Paper.staged.is_(False))
     elif record.scope_type != "library":
         raise ApiError(404, "not_found", "Export link not found")
     else:

@@ -28,6 +28,7 @@ from paperdb.db.models import (
 from paperdb.errors import ApiError
 
 SUPPORTED_FIELDS = {
+    "q",
     "title",
     "abstract",
     "year",
@@ -178,6 +179,13 @@ def _compile_rule(rule: dict[str, Any]) -> ColumnElement:
     op = rule["op"]
     value = rule.get("value")
 
+    if field == "q":
+        pattern = f"%{str(value).lower()}%"
+        return or_(
+            func.lower(Paper.title).like(pattern),
+            func.lower(Paper.paper_author_names).like(pattern),
+            func.lower(func.coalesce(Paper.abstract, "")).like(pattern),
+        )
     if field == "title":
         return _text(Paper.title, op, value)
     if field == "abstract":
