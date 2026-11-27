@@ -60,13 +60,18 @@ async def project_paper_ids(session: AsyncSession, project: Project) -> list[uui
             .where(
                 CollectionPaper.collection_id.in_(collection_ids),
                 Paper.deleted_at.is_(None),
+                Paper.staged.is_(False),
             )
         )
         ids.update(rows.all())
     pinned = await session.scalars(
         select(ProjectPaper.paper_id)
         .join(Paper, Paper.id == ProjectPaper.paper_id)
-        .where(ProjectPaper.project_id == project.id, Paper.deleted_at.is_(None))
+        .where(
+            ProjectPaper.project_id == project.id,
+            Paper.deleted_at.is_(None),
+            Paper.staged.is_(False),
+        )
     )
     ids.update(pinned.all())
     return list(ids)

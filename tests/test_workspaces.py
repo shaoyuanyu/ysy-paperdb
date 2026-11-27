@@ -254,3 +254,68 @@ async def test_personal_token_with_organize_write_can_use_workspaces(
     detail = await client.get(f"/v1/workspaces/{workspace.json()['id']}", headers=personal)
     assert detail.status_code == 200, detail.text
     assert detail.json()["paperCount"] == 0
+
+
+async def test_staged_paper_drops_out_of_library_counts(
+    client: httpx.AsyncClient,
+) -> None:
+    """Staging hides a paper from the library, so every library-facing count
+    (header totals, collection tree, tag tree, saved view) must drop it too."""
+    suffix = uuid.uuid4().hex[:8]
+    workspace = await _workspace(client, name=f"Counts {suffix}")
+    paper = await _paper(client, f"Counted {suffix}")
+    tagged = await client.patch(
+        "/v1/papers/bulk",
+        headers=SERVICE,
+        json={"ids": [paper["id"]], "patch": {"addTags": [f"topic/{suffix}"]}},
+    )
+    assert tagged.status_code == 200, tagged.text
+    collection = (
+        await client.post("/v1/collections", headers=SERVICE, json={"name": f"Count Coll {suffix}"})
+    ).json()
+    await client.post(
+        f"/v1/collections/{collection['id']}/papers",
+        headers=SERVICE,
+        json={"paperIds": [paper["id"]]},
+    )
+    view = (
+        await client.post(
+            "/v1/views",
+            headers=SERVICE,
+            json={
+                "name": f"Count View {suffix}",
+                "filter": {
+                    "version": 1,
+                    "match": "all",
+                    "rules": [{"field": "title", "op": "contains", "value": suffix}],
+                },
+                "sort": [{"field": "year", "direction": "desc"}],
+            },
+        )
+    ).json()
+
+    def tag_count(nodes: list[dict]) -> int | None:
+        for node in nodes:
+            if node["path"] == f"topic/{suffix}":
+                return node["paperCount"]
+            found = tag_count(node["children"])
+            if found is not None:
+                return found
+        return None
+
+    async def measured() -> tuple[int, int, int, int]:
+        meta = (await client.get("/v1/meta", headers=SERVICE)).json()["counts"]
+        tree = (await client.get("/v1/collections/tree", headers=SERVICE)).json()
+        in_collection = next(n["paperCount"] for n in tree if n["id"] == collection["id"])
+        tags = (await client.get("/v1/tags/tree", headers=SERVICE)).json()
+        view_rows = (await client.get(f"/v1/views/{view['id']}/count", headers=SERVICE)).json()
+        return meta["papers"], in_collection, tag_count(tags) or 0, view_rows["count"]
+
+    before = await measured()
+    assert before[1:] == (1, 1, 1)
+
+    await _stage(client, workspace["id"], paper["id"])
+
+    after = await measured()
+    assert after[0] == before[0] - 1
+    assert after[1:] == (0, 0, 0)

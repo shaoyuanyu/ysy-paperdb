@@ -34,7 +34,9 @@ async def view_count(session: AsyncSession, view: SavedView) -> int:
     condition = compile_filter(view.filter)
     return int(
         await session.scalar(
-            select(func.count()).select_from(Paper).where(Paper.deleted_at.is_(None), condition)
+            select(func.count())
+            .select_from(Paper)
+            .where(Paper.deleted_at.is_(None), Paper.staged.is_(False), condition)
         )
         or 0
     )

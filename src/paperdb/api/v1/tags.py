@@ -31,7 +31,11 @@ async def _out(session: AsyncSession, tag_id: uuid.UUID) -> TagOut:
             select(func.count())
             .select_from(PaperTag)
             .join(Paper, Paper.id == PaperTag.paper_id)
-            .where(PaperTag.tag_id == tag.id, Paper.deleted_at.is_(None))
+            .where(
+                PaperTag.tag_id == tag.id,
+                Paper.deleted_at.is_(None),
+                Paper.staged.is_(False),
+            )
         )
         or 0
     )

@@ -34,7 +34,7 @@ async def _counts(session: AsyncSession) -> dict[uuid.UUID, int]:
         await session.execute(
             select(PaperTag.tag_id, func.count())
             .join(Paper, Paper.id == PaperTag.paper_id)
-            .where(Paper.deleted_at.is_(None))
+            .where(Paper.deleted_at.is_(None), Paper.staged.is_(False))
             .group_by(PaperTag.tag_id)
         )
     ).all()

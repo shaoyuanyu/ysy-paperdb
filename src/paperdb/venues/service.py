@@ -31,6 +31,7 @@ from paperdb.db.models import (
     DatasetVersion,
     Paper,
     PaperAuthor,
+    PdfFile,
     Venue,
     VenueAlias,
     VenueIdentifier,
@@ -101,7 +102,11 @@ async def venue_paper_count(session: AsyncSession, venue_id: uuid.UUID) -> int:
         await session.scalar(
             select(func.count())
             .select_from(Paper)
-            .where(Paper.venue_id == venue_id, Paper.deleted_at.is_(None))
+            .where(
+                Paper.venue_id == venue_id,
+                Paper.deleted_at.is_(None),
+                Paper.staged.is_(False),
+            )
         )
         or 0
     )
@@ -233,7 +238,11 @@ async def author_paper_count(session: AsyncSession, author_id: uuid.UUID) -> int
             select(func.count())
             .select_from(PaperAuthor)
             .join(Paper, Paper.id == PaperAuthor.paper_id)
-            .where(PaperAuthor.author_id == author_id, Paper.deleted_at.is_(None))
+            .where(
+                PaperAuthor.author_id == author_id,
+                Paper.deleted_at.is_(None),
+                Paper.staged.is_(False),
+            )
         )
         or 0
     )
@@ -279,9 +288,26 @@ async def list_datasets(session: AsyncSession) -> list[DatasetVersion]:
 
 
 async def library_counts(session: AsyncSession) -> dict[str, int]:
+    # Papers staged in a research workspace are not in the library yet, so
+    # library-wide counts (including PDFs) skip them.
     papers = int(
         await session.scalar(
-            select(func.count()).select_from(Paper).where(Paper.deleted_at.is_(None))
+            select(func.count())
+            .select_from(Paper)
+            .where(Paper.deleted_at.is_(None), Paper.staged.is_(False))
+        )
+        or 0
+    )
+    pdfs = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(PdfFile)
+            .join(Paper, Paper.id == PdfFile.paper_id)
+            .where(
+                PdfFile.deleted_at.is_(None),
+                Paper.deleted_at.is_(None),
+                Paper.staged.is_(False),
+            )
         )
         or 0
     )
@@ -297,7 +323,13 @@ async def library_counts(session: AsyncSession) -> dict[str, int]:
         )
         or 0
     )
-    return {"papers": papers, "venues": venues, "authors": authors, "files": 0}
+    return {
+        "papers": papers,
+        "pdfs": pdfs,
+        "venues": venues,
+        "authors": authors,
+        "files": 0,
+    }
 
 
 async def venue_gaps(session: AsyncSession) -> dict[str, int]:
