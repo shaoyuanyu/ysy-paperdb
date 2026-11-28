@@ -19,14 +19,46 @@ import base64
 import json
 import os
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
 
+from paperdb import dsh_integration
+
 _BASE_URL = os.environ.get("PAPERDB_MCP_BASE_URL", "http://127.0.0.1:9720").rstrip("/")
-_TOKEN = os.environ.get("PAPERDB_MCP_TOKEN", "")
+
+
+def _load_token() -> str:
+    """The API token: PAPERDB_MCP_TOKEN, else the first readable token file.
+
+    Keeping the secret out of the DSH bundle lets that bundle live in a public
+    repository and be published as a release asset; the token stays in one
+    git-ignored file (PAPERDB_MCP_TOKEN_FILE, default ~/.config/paperdb/mcp-token).
+    """
+    token = os.environ.get("PAPERDB_MCP_TOKEN", "").strip()
+    if token:
+        return token
+    candidates: list[Path] = []
+    env_path = os.environ.get("PAPERDB_MCP_TOKEN_FILE")
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates.append(Path.home() / ".config" / "paperdb" / "mcp-token")
+    for candidate in candidates:
+        try:
+            value = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""
+
+
+_TOKEN = _load_token()
 
 mcp = FastMCP(
     "paperdb",
@@ -51,6 +83,11 @@ mcp = FastMCP(
         "and merges require the user's current 6-digit TOTP code — ask right "
         "before calling, never invent or reuse one.\n"
         "\n"
+        "Maintenance: dsh_integration_status compares the installed DSH skill "
+        "and MCP bundle with the latest GitHub release; update_dsh_integration "
+        "installs one (same TOTP gate) and rollback_dsh_integration restores "
+        "the previous install. Bundle changes take effect after DSH restarts.\n"
+        "\n"
         "When unsure what the library holds, library_stats gives the overview "
         "(totals, unread spread, how much has an extracted PDF)."
     ),
@@ -59,7 +96,10 @@ mcp = FastMCP(
 
 def _client() -> httpx.AsyncClient:
     if not _TOKEN:
-        raise RuntimeError("PAPERDB_MCP_TOKEN is not set; configure the token for the paperdb API")
+        raise RuntimeError(
+            "paperdb MCP token is not configured: set PAPERDB_MCP_TOKEN or "
+            "point PAPERDB_MCP_TOKEN_FILE at a file containing it"
+        )
     return httpx.AsyncClient(
         base_url=_BASE_URL,
         headers={"Authorization": f"Bearer {_TOKEN}"},
@@ -1807,9 +1847,178 @@ async def update_venue(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _mcp_version() -> str | None:
+    try:
+        return package_version("paperdb")
+    except PackageNotFoundError:  # pragma: no cover - always installed when used
+        return None
+
+
+def _integration_target() -> Path:
+    return dsh_integration.resolve_target(os.environ.get(dsh_integration.INTEGRATION_DIR_ENV))
+
+
+def _integration_repo() -> str:
+    return os.environ.get(dsh_integration.REPO_ENV) or dsh_integration.DEFAULT_REPO
+
+
+def _github_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
+
+
+@mcp.tool()
+async def dsh_integration_status() -> str:
+    """Inspect the DSH integration: installed skill/bundle versions, file drift,
+    and the newest GitHub release. Read-only — safe before deciding to upgrade.
+
+    Requires ``PAPERDB_DSH_INTEGRATION_DIR`` (set by the DSH bundle). GitHub
+    being unreachable does not fail the call: ``latest`` is null with ``error``.
+    """
+    try:
+        target = _integration_target()
+    except dsh_integration.IntegrationError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    installed = dsh_integration.installed_status(target)
+    result: dict[str, Any] = {
+        "ok": True,
+        "mcpServerVersion": _mcp_version(),
+        **installed,
+        "latest": None,
+    }
+    try:
+        async with _github_client() as client:
+            release = await dsh_integration.fetch_release(
+                client, _integration_repo(), token=dsh_integration.github_token()
+            )
+    except (dsh_integration.IntegrationError, httpx.HTTPError) as exc:
+        result["error"] = f"could not read releases: {exc}"
+        return json.dumps(result, ensure_ascii=False)
+    current = installed.get("version")
+    newer = current is None or dsh_integration.parse_version(
+        release.version
+    ) > dsh_integration.parse_version(current)
+    result["latest"] = {
+        "version": release.version,
+        "tag": release.tag,
+        "publishedAt": release.published_at,
+        "prerelease": release.prerelease,
+        "page": release.page_url,
+        "asset": release.asset_name,
+        "sha256": release.asset_sha256,
+        "notes": release.notes[:1200],
+    }
+    result["updateAvailable"] = newer
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool()
+async def update_dsh_integration(
+    totp_code: str | None = None,
+    version: str | None = None,
+    dry_run: bool = False,
+) -> str:
+    """Install the latest (or a pinned) DSH integration release: the
+    ``my-paperdb`` skill and the MCP bundle that launches this server.
+
+    Downloads the release asset, verifies its SHA-256 digest and per-file
+    manifest, backs up the current files, then writes atomically. Bundle changes
+    only take effect after DSH restarts; skill changes are picked up by new
+    sessions.
+
+    Writes files on this machine, so applying requires the owner's current
+    6-digit TOTP code (same as deletes). Use ``dry_run=true`` to preview the
+    file plan without a code; ``version`` pins a release (never a downgrade —
+    use rollback_dsh_integration for that).
+    """
+    try:
+        target = _integration_target()
+    except dsh_integration.IntegrationError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    if not dry_run:
+        await _request(
+            "POST",
+            "/v1/totp/verify",
+            headers={"X-TOTP-Code": (totp_code or "").strip()},
+        )
+    repo = _integration_repo()
+    token = dsh_integration.github_token()
+    try:
+        async with _github_client() as client:
+            release = await dsh_integration.fetch_release(
+                client, repo, version=version, token=token
+            )
+            current = dsh_integration.installed_status(target).get("version")
+            if current is not None:
+                current_key = dsh_integration.parse_version(current)
+                target_key = dsh_integration.parse_version(release.version)
+                if target_key < current_key:
+                    raise dsh_integration.IntegrationError(
+                        f"{release.version} is older than the installed {current}; "
+                        "use rollback_dsh_integration to revert"
+                    )
+                if target_key == current_key and not version:
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "upToDate": True,
+                            "version": current,
+                            "release": release.tag,
+                            "restartRequired": False,
+                        },
+                        ensure_ascii=False,
+                    )
+            payload = await dsh_integration.download_bytes(client, release.asset_url, token=token)
+            digest = release.asset_sha256 or await dsh_integration.checksum_from_release(
+                client, release, release.asset_name, token=token
+            )
+            if not digest:
+                raise dsh_integration.IntegrationError(
+                    "release carries no SHA-256 digest (asset digest and SHA256SUMS "
+                    "are both missing); refusing to install unverified files"
+                )
+            asset = dsh_integration.verify_asset(
+                payload, expected_sha256=digest, expected_version=release.version
+            )
+        context = {
+            "mcp_command": dsh_integration.default_mcp_command(),
+            "base_url": _BASE_URL,
+            "token": _TOKEN,
+            "target": str(target),
+            "repo": repo,
+        }
+        report = dsh_integration.install(target, asset, release, context=context, dry_run=dry_run)
+    except dsh_integration.IntegrationError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    return json.dumps(report, ensure_ascii=False)
+
+
+@mcp.tool()
+async def rollback_dsh_integration(totp_code: str | None = None) -> str:
+    """Restore the DSH skill + MCP bundle from the backup taken by the last
+    update_dsh_integration. Requires the owner's current 6-digit TOTP code;
+    restart DSH afterwards when the bundle changed."""
+    try:
+        target = _integration_target()
+    except dsh_integration.IntegrationError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    await _request(
+        "POST",
+        "/v1/totp/verify",
+        headers={"X-TOTP-Code": (totp_code or "").strip()},
+    )
+    try:
+        report = dsh_integration.rollback(target)
+    except dsh_integration.IntegrationError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    return json.dumps(report, ensure_ascii=False)
+
+
 def main() -> None:
     if not _TOKEN:
-        print("paperdb-mcp: PAPERDB_MCP_TOKEN is not set", file=sys.stderr)
+        print(
+            "paperdb-mcp: no token (set PAPERDB_MCP_TOKEN or PAPERDB_MCP_TOKEN_FILE)",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
     mcp.run()
 

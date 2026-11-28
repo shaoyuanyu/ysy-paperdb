@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb import __version__
-from paperdb.api.deps import get_principal, scoped
+from paperdb.api.deps import get_principal, require_totp, scoped
 from paperdb.api.schemas import DatasetOut, LibraryStatsOut, MetaOut, StorageOut
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.config import Settings, get_settings
@@ -27,6 +27,17 @@ async def me(principal: TokenPrincipal = Depends(get_principal)) -> dict[str, ob
         "name": principal.name,
         "scopes": sorted(principal.scopes),
     }
+
+
+@router.post("/totp/verify")
+async def totp_verify(_: None = Depends(require_totp)) -> dict[str, bool]:
+    """Validate the owner's current TOTP without side effects.
+
+    Agent tools that write locally (the DSH integration updater, for one) ask
+    for the same 6-digit code as destructive operations; the MCP server holds
+    no TOTP secret, so it proves the code here before touching disk.
+    """
+    return {"ok": True}
 
 
 @router.get("/library/stats", response_model=LibraryStatsOut)

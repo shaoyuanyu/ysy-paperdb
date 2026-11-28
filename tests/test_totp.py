@@ -131,3 +131,30 @@ async def test_association_removal_not_gated(client: httpx.AsyncClient, path_fac
     # ungated: any failure is scope/validation semantics, never a TOTP code
     assert "totp" not in str(response.json().get("code", "")), response.text
     reset_failures()
+
+
+async def test_totp_verify_endpoint(client: httpx.AsyncClient) -> None:
+    """The side-effect-free check the MCP updater uses before writing files."""
+    reset_failures()
+    personal = await _personal_token(client)
+
+    missing = await client.post("/v1/totp/verify", headers=personal)
+    assert missing.status_code == 428, missing.text
+    assert missing.json()["code"] == "totp_required"
+
+    good = await client.post(
+        "/v1/totp/verify",
+        headers={**personal, "X-TOTP-Code": current_totp(SECRET)},
+    )
+    assert good.status_code == 200, good.text
+    assert good.json() == {"ok": True}
+
+    bad = await client.post("/v1/totp/verify", headers={**personal, "X-TOTP-Code": "000000"})
+    assert bad.status_code == 403, bad.text
+    assert bad.json()["code"] == "totp_invalid"
+    reset_failures()
+
+
+async def test_totp_verify_service_token_bypasses(client: httpx.AsyncClient) -> None:
+    response = await client.post("/v1/totp/verify", headers=SERVICE)
+    assert response.status_code == 200, response.text

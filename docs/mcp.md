@@ -4,9 +4,9 @@
 
 > **人类在前端能做的操作，agent 必须能用工具做完；做不到的，必须在本文件里写明理由。**
 
-这条规则由 [`tests/test_mcp_coverage.py`](../tests/test_mcp_coverage.py) 强制执行——它枚举 OpenAPI 的每个操作，逐个比对 MCP 实际调用的端点，新增接口若既不包装也不登记理由，测试直接失败。覆盖情况：**116 个 API 操作，95 个由工具直接覆盖，其余 21 个在下方「刻意不开放」中逐条说明**。
+这条规则由 [`tests/test_mcp_coverage.py`](../tests/test_mcp_coverage.py) 强制执行——它枚举 OpenAPI 的每个操作，逐个比对 MCP 实际调用的端点，新增接口若既不包装也不登记理由，测试直接失败。覆盖情况：**117 个 API 操作，96 个由工具直接覆盖，其余 21 个在下方「刻意不开放」中逐条说明**。
 
-工具数量：**93**。传输：stdio（`paperdb-mcp`），令牌用个人 token，scope 决定真实权限（`whoami` 可查）。
+工具数量：**96**。传输：stdio（`paperdb-mcp`），令牌用个人 token，scope 决定真实权限（`whoami` 可查）。
 
 ## 导入
 
@@ -90,6 +90,19 @@ staged 论文不进出库列表与库级搜索，但 **`get_paper_text` / `searc
 |---|---|
 | `list_authors` / `get_author` / `create_author` / `update_author` | 作者记录 |
 | `list_venues` / `get_venue` / `get_venue_ranks` / `create_venue` / `update_venue` | 场馆、CCF/CAS 评级、补建场馆 |
+
+## DSH 集成维护（skill + MCP bundle）
+
+| 工具 | 端点 | 说明 |
+|---|---|---|
+| `dsh_integration_status` | GitHub Releases API | 只读：已装版本、文件漂移、最新 release、`updateAvailable` |
+| `update_dsh_integration` | `POST /v1/totp/verify` + GitHub | 校验 SHA-256 → 备份 → 原子写入 skill/bundle；`dry_run` 预览不写盘、免验证码 |
+| `rollback_dsh_integration` | `POST /v1/totp/verify` | 用上一次更新的备份回滚 |
+
+更新的是**运行 MCP 的这台机器**上的文件（`PAPERDB_DSH_INTEGRATION_DIR` 下的
+`mcp/dsh-paperdb-mcp/` 与 `skills/my-paperdb/`），所以和删除类操作一样要当前 6 位 TOTP。
+bundle 的改动重启 DSH 后才生效，skill 的改动新会话可见。发布与校验细节见
+[`for-agents/README.md`](../for-agents/README.md)。
 
 ## 危险操作
 

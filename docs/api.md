@@ -286,6 +286,7 @@ If-Match: "3"            # 可选，乐观锁
 | GET | `/readyz` | — | DB + 存储可用性 |
 | GET | `/v1/meta` | R | 版本、数据集、计数、存储用量、job backlog |
 | GET | `/v1/library/stats` | R | 文献库一览：总量、阅读状态分布、可读性（有 PDF / 已抽文本）、集合/标签/项目/工作区计数 |
+| POST | `/v1/totp/verify` | — | 校验当前 6 位 TOTP 且无副作用；本机写盘的 agent 工具（如 DSH 集成升级）用它取用户批准 |
 | GET | `/openapi.json` | — | OpenAPI 3.1 |
 
 `GET /v1/library/stats` 响应示例（agent 用来"一眼看清库里有什么"）：
@@ -766,6 +767,8 @@ If-Match: "3"            # 可选，乐观锁
   错误/过期 403 `totp_invalid`；连续 5 次失败锁定 15 分钟。
 - 关联级移除（`DELETE /papers/{ref}/tags`、`/collections`、项目成员）不设门：可重加，
   无数据损失。
+- `POST /v1/totp/verify` 只做校验（同样受 428/403/锁定约束），给「在本机写文件」的
+  agent 工具提供批准凭据，避免为了验证码去执行一次真实删除。
 - 论文/合集删除本身是软删（`deleted_at` + restore 端点），TOTP 是操作前的用户批准步骤。
 
 `POST /v1/imports/identifiers` 请求：

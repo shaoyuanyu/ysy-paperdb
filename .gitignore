@@ -15,3 +15,6 @@ data/
 .coverage
 htmlcov/
 .DS_Store
+
+# machine-local API token (the bundle references a path outside the repo)
+mcp-token

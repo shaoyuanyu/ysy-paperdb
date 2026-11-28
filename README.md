@@ -118,29 +118,32 @@ Next: production smoke + periodic citation sync; optional graph canvas.
 ## Agent integration (MCP server + skill)
 
 `src/paperdb/mcp_server.py` wraps the HTTP API as an MCP stdio server
-(`uv sync --extra mcp`, then `.venv/bin/paperdb-mcp`), exposing 33 tools
-covering import (`import_paper`, `import_papers`, `import_paper_with_pdf`,
-`import_bibtex`), lookup/browsing (`resolve`, `get_paper`, `list_papers`,
-`search_papers`, `list_files`, `search_fulltext`, citation graph), organization
-(tags/collections/projects/reading state, and **research workspaces** —
-staging areas whose papers stay out of the library until promoted), **repair**
-(`update_paper`, `attach_pdf`, `list_venues`) and TOTP-gated
-`delete_paper`/`merge_papers`.
+(`uv sync --extra mcp`, then `.venv/bin/paperdb-mcp`), exposing the whole API
+surface as agent tools — import/resolve/BibTeX, reading (text, page images,
+scoped search), organization (tags/collections/projects/views/rules,
+**research workspaces** whose papers stay out of the library until promoted),
+and TOTP-gated deletes/merges. `docs/mcp.md` is the tool-by-tool contract and
+the coverage guard (`tests/test_mcp_coverage.py`) keeps it honest.
 Import tools poll their job and return the final per-item status plus the
 paper. Configuration via env: `PAPERDB_MCP_BASE_URL` (default
-`http://127.0.0.1:9720`) and `PAPERDB_MCP_TOKEN` (required).
+`http://127.0.0.1:9720`) and a token from `PAPERDB_MCP_TOKEN`, else the file in
+`PAPERDB_MCP_TOKEN_FILE`, else `~/.config/paperdb/mcp-token`.
 
-The DeepSeek Harness registration lives at the workspace root in
-`for-agents/mcp/dsh-paperdb-mcp/` (bundle inserting `@deepseek-ai/dsh-mcp-client`,
-stdio, server name `paperdb` → tools appear as `mcp__paperdb__*`; currently
-targeting the production VPS API through an SSH tunnel, see the patch header).
-The `my-paperdb` skill's real file lives at `for-agents/skills/my-paperdb/`
-(workspace root, next to the MCP bundle); `~/.agents/skills/my-paperdb` and
-`.dsh/skills/my-paperdb` in this repo are symlinks to it, so every DSH session
-discovers it through the user-agents root and sessions inside this repo also
-see it via the project `.dsh/skills` root. It teaches agents the import
-ladder (URL → identifier → BibTeX → PDF → WeChat-article-to-title), the
-verify-before-reporting rules, and the OA PDF acquisition paths.
+The DeepSeek Harness integration lives in `for-agents/` — the
+`@local/dsh-paperdb-mcp` bundle plus the `my-paperdb` skill, hand-edited as
+source and packaged by `scripts/build_dsh_release.py` into the GitHub Release
+asset `paperdb-dsh-<version>.tar.gz` (`.github/workflows/release.yml`, every
+`v*` tag). `paperdb-mcp` installs a release into
+`PAPERDB_DSH_INTEGRATION_DIR` through `dsh_integration_status` /
+`update_dsh_integration` / `rollback_dsh_integration`; applying an update is
+TOTP-gated, verifies the asset digest plus a per-file manifest, and keeps the
+previous files for rollback. The bundle carries no secret: the token lives in
+`~/.config/paperdb/mcp-token` (or wherever `PAPERDB_MCP_TOKEN_FILE` points).
+`~/.agents/skills/my-paperdb` and `.dsh/skills/my-paperdb` are symlinks into
+`for-agents/skills/my-paperdb`, so every DSH session discovers it. Layout,
+publishing and trust model: `for-agents/README.md`. The skill teaches agents
+the import ladder (URL → identifier → BibTeX → PDF → WeChat-article-to-title),
+the verify-before-reporting rules, and the OA PDF acquisition paths.
 
 Landing-page ingestion (2026-11): `resolve` and all import entry points accept
 any paper page URL. The page is fetched, mined for `citation_*`/og/H1/DOI/
