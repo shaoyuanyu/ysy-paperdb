@@ -27,7 +27,7 @@ on:
     branches: [main]
     paths-ignore:
       - "**/*.md"
-      - "for-agents/**"
+      - "adapters/**"
   workflow_dispatch:
     inputs:
       version:

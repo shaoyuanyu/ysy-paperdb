@@ -5,60 +5,37 @@ thin, typed wrapper around the paperdb HTTP API — every tool maps to one (or a
 short poll around one) API endpoint, so the backend remains the single source
 of truth for validation, dedupe, venue normalization, and job logs.
 
+The server is harness-neutral: it speaks plain MCP, reads only ``PAPERDB_MCP_*``
+configuration, and knows nothing about which agent host launched it. Installing
+this server into a particular host is the job of ``paperdb adapter`` (see
+``paperdb.adapters``), not of a tool.
+
 Configuration (environment):
     PAPERDB_MCP_BASE_URL  base URL of the paperdb API (default http://127.0.0.1:9720)
     PAPERDB_MCP_TOKEN     Bearer token (service or personal token)
+    PAPERDB_MCP_TOKEN_FILE where to read the token from when the above is unset
 
-Run:  uv run paperdb-mcp        (stdio; launch from the agent harness)
+Run:  uv run paperdb-mcp        (stdio; launch from any MCP-capable host)
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
-import os
 import sys
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.fastmcp import Context, FastMCP, Image
 
-from paperdb import dsh_integration
+from paperdb import mcp_config, mcp_local, page_cache
+from paperdb import mcp_toolsets as toolsets
 
-_BASE_URL = os.environ.get("PAPERDB_MCP_BASE_URL", "http://127.0.0.1:9720").rstrip("/")
-
-
-def _load_token() -> str:
-    """The API token: PAPERDB_MCP_TOKEN, else the first readable token file.
-
-    Keeping the secret out of the DSH bundle lets that bundle live in a public
-    repository and be published as a release asset; the token stays in one
-    git-ignored file (PAPERDB_MCP_TOKEN_FILE, default ~/.config/paperdb/mcp-token).
-    """
-    token = os.environ.get("PAPERDB_MCP_TOKEN", "").strip()
-    if token:
-        return token
-    candidates: list[Path] = []
-    env_path = os.environ.get("PAPERDB_MCP_TOKEN_FILE")
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
-    candidates.append(Path.home() / ".config" / "paperdb" / "mcp-token")
-    for candidate in candidates:
-        try:
-            value = candidate.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if value:
-            return value
-    return ""
-
-
-_TOKEN = _load_token()
+_BASE_URL = mcp_config.base_url()
+_TOKEN = mcp_config.load_token()
 
 mcp = FastMCP(
     "paperdb",
@@ -83,15 +60,70 @@ mcp = FastMCP(
         "and merges require the user's current 6-digit TOTP code — ask right "
         "before calling, never invent or reuse one.\n"
         "\n"
-        "Maintenance: dsh_integration_status compares the installed DSH skill "
-        "and MCP bundle with the latest GitHub release; update_dsh_integration "
-        "installs one (same TOTP gate) and rollback_dsh_integration restores "
-        "the previous install. Bundle changes take effect after DSH restarts.\n"
+        "Tool groups: the tool table is loaded by workflow, not flat. This "
+        "session starts with import + read + organize (per-paper management); "
+        "the further groups workflow (research workspaces, projects, smart "
+        "views, auto-rules) and library (authors, venues) are one call away — "
+        'call toolset(op="enable", groups=[...]) and the tools it returns '
+        'are immediately callable. toolset(op="list") shows every group, '
+        "its description and its tools.\n"
+        "\n"
+        "Boundaries: local reads are confined to PDFs under ~/Downloads, "
+        "~/Desktop, ~/Documents and the OS temp dir (extend with "
+        "PAPERDB_MCP_LOCAL_ROOTS); "
+        "the only local writes are a page-image cache under "
+        "~/.cache/paperdb/mcp. Every library change goes through the API as the "
+        "token's owner; deletes, merges and adapter writes need the user's "
+        "current TOTP, so confirm intent before bulk or destructive edits.\n"
+        "\n"
+        "Installation and upgrades happen outside the conversation: the "
+        "`paperdb adapter` CLI installs this server into a host, and no tool "
+        "here writes that host's configuration.\n"
         "\n"
         "When unsure what the library holds, library_stats gives the overview "
         "(totals, unread spread, how much has an extracted PDF)."
     ),
 )
+
+toolsets.bind(mcp)
+
+
+@mcp.tool()
+async def toolset(
+    op: str = "list",
+    groups: list[str] | None = None,
+    ctx: Context | None = None,
+) -> str:
+    """Discover tool groups, or load more of them into this session.
+
+    The server exposes the whole library, but the tool table is loaded by
+    workflow: a session starts with the groups it needs and adds others on
+    demand, so a narrow task does not carry every schema.
+
+    op="list"     -> every group with its description, enabled flag and tools
+    op="enable"   -> load groups (e.g. ["workflow"]); the returned addedTools
+                     are callable immediately, even if the host has not
+                     refreshed its tool list yet.
+
+    Groups: import (入出库与元数据), read (阅读/检索), organize (标签/集合/批注/
+    批量/删除/合并), workflow (调研工作区/项目/视图/规则), library (作者/场馆).
+    """
+    try:
+        if op == "enable":
+            report = toolsets.enable(groups or [])
+            if ctx is not None:
+                # Best effort: a host is allowed not to support tool-list updates.
+                with contextlib.suppress(Exception):
+                    await ctx.session.send_tool_list_changed()
+            return json.dumps(report, ensure_ascii=False)
+        if op != "list":
+            return json.dumps(
+                {"ok": False, "error": f"unknown op {op!r}; use 'list' or 'enable'"},
+                ensure_ascii=False,
+            )
+        return json.dumps(toolsets.report(), ensure_ascii=False)
+    except toolsets.ToolsetError as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 
 
 def _client() -> httpx.AsyncClient:
@@ -187,18 +219,43 @@ def _brief_paper(paper: dict[str, Any]) -> dict[str, Any]:
 _TERMINAL = {"succeeded", "failed", "cancelled", "dead"}
 
 
-async def _wait_for_import(import_id: str, timeout_s: float = 90.0) -> dict[str, Any]:
-    """Poll an import job until terminal, then return job + items."""
-    deadline = asyncio.get_event_loop().time() + timeout_s
-    job: dict[str, Any] = {}
+_IMPORT_WAIT_DEFAULT = 15.0
+_IMPORT_WAIT_MAX = 60.0
+
+
+def _wait_budget(wait_seconds: float | None) -> float:
+    """Clamp a caller's wait budget; ``None`` means the tool default."""
+    if wait_seconds is None:
+        return _IMPORT_WAIT_DEFAULT
+    try:
+        value = float(wait_seconds)
+    except (TypeError, ValueError):
+        return _IMPORT_WAIT_DEFAULT
+    if value != value:  # NaN
+        return _IMPORT_WAIT_DEFAULT
+    return max(0.0, min(value, _IMPORT_WAIT_MAX))
+
+
+async def _wait_for_import(import_id: str, wait_seconds: float | None = None) -> dict[str, Any]:
+    """Poll an import job for up to ``wait_seconds``, then return a usable snapshot.
+
+    Never blocks until the host's tool timeout: the default budget is 15s and
+    the ceiling is 60s, so a batch that is still running comes back with its
+    per-item state and a ``next`` hint (``get_import``) instead of a killed
+    tool call. ``wait_seconds=0`` returns immediately after one status read.
+    """
+    budget = _wait_budget(wait_seconds)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
     while True:
         job = await _request("GET", f"/v1/imports/{import_id}")
         if job.get("status") in _TERMINAL:
             break
-        if asyncio.get_event_loop().time() > deadline:
-            job["note"] = f"still {job.get('status')} after {timeout_s:.0f}s; poll get_import"
-            return job
-        await asyncio.sleep(0.8)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(0.5, remaining))
+
     items = await _request("GET", f"/v1/imports/{import_id}/items")
     out: dict[str, Any] = dict(job)
     out["items"] = [
@@ -210,13 +267,20 @@ async def _wait_for_import(import_id: str, timeout_s: float = 90.0) -> dict[str,
         }
         for item in items
     ]
-    if out.get("status") == "succeeded" and len(items) == 1 and items[0].get("paperId"):
+    out["pendingItems"] = sum(1 for item in items if item.get("status") == "pending")
+    if out.get("status") not in _TERMINAL:
+        out["next"] = (
+            f"{out.get('status')} after a {budget:g}s wait; "
+            f"{out['pendingItems']} item(s) still pending. "
+            f'Call get_import(import_id="{import_id}") to continue.'
+        )
+    elif out.get("status") == "succeeded" and len(items) == 1 and items[0].get("paperId"):
         paper = await _request("GET", f"/v1/papers/{items[0]['paperId']}")
         out["paper"] = _brief_paper(paper)
     return out
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def resolve(query: str) -> str:
     """Resolve a paper reference without writing anything.
 
@@ -240,13 +304,14 @@ async def resolve(query: str) -> str:
     return json.dumps(candidate, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def import_paper(
     query: str,
     tags: list[str] | None = None,
     collection_id: str | None = None,
     workspace_id: str | None = None,
     on_duplicate: str = "link",
+    wait_seconds: float | None = None,
 ) -> str:
     """Import one paper into the library (identifier, title, or landing-page URL).
 
@@ -258,8 +323,11 @@ async def import_paper(
     are applied on import. on_duplicate: "link" (default) also links strong
     fuzzy matches; "skip" only links identifier duplicates without merging;
     "create" always creates a new entry (use when the user deliberately
-    wants to keep two versions as separate entries). Waits for the import
-    job and returns the final per-item status plus the imported paper.
+    wants to keep two versions as separate entries).
+
+    Waits up to ``wait_seconds`` (default 15, max 60; 0 returns immediately)
+    for the job; a single successful import also returns the paper. If the job
+    is still running, the result carries `next` — continue with get_import.
     """
     valid = on_duplicate if on_duplicate in {"link", "skip", "create"} else "link"
     options: dict[str, Any] = {"onDuplicate": valid}
@@ -272,10 +340,10 @@ async def import_paper(
     created = await _request(
         "POST", "/v1/imports/identifiers", json={"items": [query], "options": options}
     )
-    return json.dumps(await _wait_for_import(created["importId"]), ensure_ascii=False)
+    return json.dumps(await _wait_for_import(created["importId"], wait_seconds), ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def import_paper_with_pdf(
     url: str,
     filename: str | None = None,
@@ -322,14 +390,14 @@ async def _apply_defaults(paper_id: str, tags: list[str] | None, collection_id: 
         )
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def import_papers(
     items: list[str],
     tags: list[str] | None = None,
     collection_id: str | None = None,
     workspace_id: str | None = None,
     on_duplicate: str = "link",
-    timeout_s: float = 180.0,
+    wait_seconds: float | None = None,
 ) -> str:
     """Import several papers in ONE job (identifiers, titles, or page URLs).
 
@@ -355,25 +423,24 @@ async def import_papers(
     created = await _request(
         "POST", "/v1/imports/identifiers", json={"items": cleaned, "options": options}
     )
-    return json.dumps(
-        await _wait_for_import(created["importId"], timeout_s=timeout_s), ensure_ascii=False
-    )
+    return json.dumps(await _wait_for_import(created["importId"], wait_seconds), ensure_ascii=False)
 
 
-@mcp.tool()
-async def import_bibtex(bibtex: str) -> str:
+@toolsets.tool(group="import")
+async def import_bibtex(bibtex: str, wait_seconds: float | None = None) -> str:
     """Import papers from a BibTeX string (up to 500 entries).
 
     Entries carrying a DOI/arXiv ID are re-resolved against the metadata
-    sources for authoritative fields; citekeys are preserved. Waits for the
-    import job and returns per-item statuses.
+    sources for authoritative fields; citekeys are preserved. Waits up to
+    ``wait_seconds`` (default 15, max 60); a job that is still running returns
+    `next` for get_import.
     """
     files = {"file": ("import.bib", bibtex.encode("utf-8"), "application/x-bibtex")}
     created = await _request("POST", "/v1/imports/bibtex", files=files)
-    return json.dumps(await _wait_for_import(created["importId"]), ensure_ascii=False)
+    return json.dumps(await _wait_for_import(created["importId"], wait_seconds), ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def get_paper(ref: str) -> str:
     """Get one paper by id, citekey, or DOI: venue with CCF/CAS evaluation,
     authors, identifiers, abstract, and reading state. PDFs are NOT included —
@@ -382,7 +449,7 @@ async def get_paper(ref: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def update_paper(
     paper_ref: str,
     venue_id: str | None = None,
@@ -419,7 +486,7 @@ async def update_paper(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def attach_pdf(paper_ref: str, url: str, filename: str | None = None) -> str:
     """Attach a PDF to a paper that is already in the library (by direct URL).
 
@@ -433,33 +500,7 @@ async def attach_pdf(paper_ref: str, url: str, filename: str | None = None) -> s
     return json.dumps(result, ensure_ascii=False)
 
 
-MAX_LOCAL_PDF_BYTES = 200 * 1024 * 1024
-
-
-def _read_local_pdf(path: str) -> tuple[bytes, str]:
-    """Read a PDF from the host filesystem for multipart upload.
-
-    The MCP server runs on the user's machine, so a local path is reachable
-    even though the backend API never sees the filesystem. Validating here
-    turns "wrong path / not a PDF / too large" into an immediate, readable
-    error instead of an opaque upload failure.
-    """
-    from pathlib import Path
-
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        raise ValueError(f"path must be absolute: {path}")
-    if not candidate.is_file():
-        raise ValueError(f"not a file: {candidate}")
-    data = candidate.read_bytes()
-    if not data.startswith(b"%PDF-"):
-        raise ValueError(f"not a PDF (missing %PDF- header): {candidate}")
-    if len(data) > MAX_LOCAL_PDF_BYTES:
-        raise ValueError(f"PDF is {len(data)} bytes, over the {MAX_LOCAL_PDF_BYTES} byte limit")
-    return data, candidate.name
-
-
-@mcp.tool()
+@toolsets.tool(group="import")
 async def upload_pdf(paper_ref: str, path: str) -> str:
     """Attach a PDF from the local filesystem to an existing paper.
 
@@ -468,7 +509,7 @@ async def upload_pdf(paper_ref: str, path: str) -> str:
     attachment) with no reachable URL. ``path`` must be absolute on the machine
     running this MCP server; extraction is queued and returns a job id.
     """
-    data, filename = _read_local_pdf(path)
+    data, filename = mcp_local.read_pdf(path)
     result = await _request(
         "POST",
         f"/v1/papers/{paper_ref}/files",
@@ -477,7 +518,7 @@ async def upload_pdf(paper_ref: str, path: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def import_pdf_file(path: str) -> str:
     """Import a paper straight from a local PDF file (the web UI's "drop a PDF").
 
@@ -485,7 +526,7 @@ async def import_pdf_file(path: str) -> str:
     text extraction is queued. Identical bytes link to the existing paper, so
     re-importing the same file cannot duplicate. ``path`` must be absolute.
     """
-    data, filename = _read_local_pdf(path)
+    data, filename = mcp_local.read_pdf(path)
     result = await _request(
         "POST",
         "/v1/imports/pdf",
@@ -494,7 +535,7 @@ async def import_pdf_file(path: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def list_files(paper_ref: str) -> str:
     """List a paper's stored PDFs: id, filename, size, primary, and
     ``textStatus`` (extracted / pending / failed / ocr_needed)."""
@@ -570,7 +611,7 @@ async def _paper_text(
     return json.dumps(payload, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def get_paper_text(
     paper_ref: str,
     page_from: int = 1,
@@ -597,7 +638,7 @@ async def get_paper_text(
     return await _paper_text(paper_ref, page_from, page_to, max_pages, file_id)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def get_paper_outline(paper_ref: str, file_id: str | None = None) -> str:
     """The paper's section structure (title + page), when the PDF has bookmarks.
 
@@ -618,7 +659,7 @@ async def get_paper_outline(paper_ref: str, file_id: str | None = None) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def library_stats() -> str:
     """One-call overview: how many papers, how many readable, reading-status spread.
 
@@ -629,23 +670,32 @@ async def library_stats() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
-async def get_page_image(file_id: str, page: int, dpi: int = 144) -> Image:
+@toolsets.tool(group="read")
+async def get_page_image(file_id: str, page: int, dpi: int = 120) -> Image:
     """Render one PDF page as an image.
 
     Text cannot carry figures, tables, equations or two-column layout — this is
     the half of a paper a human sees rather than reads. Use it after
     get_paper_text when the text says "see Figure 3" or the numbers do not
-    line up. Keep ``dpi`` modest (96-144) for a whole page; raise it only to
-    zoom into one small figure.
+    line up.
+
+    An image costs context by area, so 120 dpi (a whole A4 page well under the
+    1568 px long edge most providers downscale to) is the default: read the
+    page at 120 first, and raise ``dpi`` only to zoom into one small figure.
+    Pages are content-addressed and cached locally, so re-reading a page is
+    cheap.
     """
-    response = await _raw_request(
-        "GET", f"/v1/files/{file_id}/pages/{page}/image", params={"dpi": dpi}
-    )
-    return Image(data=response.content, format="png")
+    png = page_cache.read(file_id, page, dpi)
+    if png is None:
+        response = await _raw_request(
+            "GET", f"/v1/files/{file_id}/pages/{page}/image", params={"dpi": dpi}
+        )
+        png = response.content
+        page_cache.write(file_id, page, dpi, png)
+    return Image(data=png, format="png")
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def get_annotations(paper_ref: str, page: int | None = None) -> str:
     """Read the owner's highlights and notes on a paper (quote, comment, page).
 
@@ -659,7 +709,7 @@ async def get_annotations(paper_ref: str, page: int | None = None) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def reindex_file(file_id: str) -> str:
     """Re-run text extraction for one PDF (repair after textStatus failed).
 
@@ -670,7 +720,7 @@ async def reindex_file(file_id: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def list_venues(q: str = "", limit: int = 10, cursor: str | None = None) -> str:
     """Search venues (conferences/journals) by name or abbreviation.
 
@@ -687,7 +737,7 @@ async def list_venues(q: str = "", limit: int = 10, cursor: str | None = None) -
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def search_papers(q: str, limit: int = 20) -> str:
     """Search the library by title/author/citekey. Returns brief papers."""
     result = await _request("GET", "/v1/papers", params={"q": q, "limit": limit})
@@ -696,7 +746,7 @@ async def search_papers(q: str, limit: int = 20) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def add_tags(paper_ref: str, paths: list[str]) -> str:
     """Add hierarchical tag paths (e.g. "topic/security", "status/to-read") to
     a paper (by id, citekey, or DOI). Missing tag nodes are created."""
@@ -704,7 +754,7 @@ async def add_tags(paper_ref: str, paths: list[str]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def add_to_collection(paper_ref: str, collection_id: str) -> str:
     """Add a paper to a collection (by collection id; see list_collections)."""
     result = await _request(
@@ -713,14 +763,14 @@ async def add_to_collection(paper_ref: str, collection_id: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def list_collections() -> str:
     """List the collection tree (id, name, path) to pick a collection id."""
     result = await _request("GET", "/v1/collections/tree")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def list_workspaces(include_closed: bool = False) -> str:
     """List research workspaces (staging areas) with paper/pending counts.
 
@@ -732,7 +782,7 @@ async def list_workspaces(include_closed: bool = False) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def create_workspace(name: str, description: str | None = None) -> str:
     """Create a research workspace (staging area) for a batch of papers.
 
@@ -746,7 +796,7 @@ async def create_workspace(name: str, description: str | None = None) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def get_workspace(workspace_id: str, pending_only: bool = False) -> str:
     """Get a workspace with its papers (citekey/title/year/promoted)."""
     result = await _request(
@@ -755,7 +805,7 @@ async def get_workspace(workspace_id: str, pending_only: bool = False) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def update_workspace(
     workspace_id: str,
     name: str | None = None,
@@ -773,7 +823,7 @@ async def update_workspace(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def add_to_workspace(workspace_id: str, paper_refs: list[str]) -> str:
     """Add existing papers to a workspace and mark them staged (hidden).
 
@@ -788,7 +838,7 @@ async def add_to_workspace(workspace_id: str, paper_refs: list[str]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def promote_workspace_papers(
     workspace_id: str, paper_refs: list[str], collection_id: str | None = None
 ) -> str:
@@ -804,7 +854,7 @@ async def promote_workspace_papers(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def discard_workspace_papers(workspace_id: str, paper_refs: list[str]) -> str:
     """Discard papers from a research workspace (staged ones are soft-deleted)."""
     result = await _request(
@@ -815,7 +865,7 @@ async def discard_workspace_papers(workspace_id: str, paper_refs: list[str]) -> 
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def create_collection(
     name: str, parent_id: str | None = None, description: str | None = None
 ) -> str:
@@ -833,7 +883,7 @@ async def create_collection(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def close_workspace(workspace_id: str, discard_unpromoted: bool = False) -> str:
     """Close a research workspace once its papers are promoted or discarded.
 
@@ -848,13 +898,18 @@ async def close_workspace(workspace_id: str, discard_unpromoted: bool = False) -
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def get_import(import_id: str) -> str:
-    """Get an import job's status and per-item results (poll while pending)."""
-    return json.dumps(await _wait_for_import(import_id, timeout_s=0.1), ensure_ascii=False)
+    """Get an import job's status and per-item results (the continuation call).
+
+    Returns immediately: status, per-item state, `pendingItems`, and — while
+    the job is still running — a `next` hint. Import tools that timed out
+    their wait point here.
+    """
+    return json.dumps(await _wait_for_import(import_id, wait_seconds=0), ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def list_papers(
     q: str | None = None,
     collection_id: str | None = None,
@@ -921,21 +976,21 @@ async def list_papers(
     return json.dumps(payload, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def list_tags() -> str:
     """List the full hierarchical tag tree (namespace paths + paper counts)."""
     result = await _request("GET", "/v1/tags/tree")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def list_projects() -> str:
     """List project workspaces (name, description, collections, paper count)."""
     result = await _request("GET", "/v1/projects")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def get_project(project_id: str) -> str:
     """Get one project with its papers (project detail + paper list)."""
     detail = await _request("GET", f"/v1/projects/{project_id}")
@@ -947,7 +1002,7 @@ async def get_project(project_id: str) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def get_citations(paper_ref: str, kind: str = "references") -> str:
     """Get a paper's citation graph: 'references' (papers it cites) or
     'citations' (papers citing it). Library entries are resolved; external
@@ -991,7 +1046,7 @@ async def _search_text(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def search_text(
     q: str,
     scope: str = "library",
@@ -1014,13 +1069,13 @@ async def search_text(
     return await _search_text(q, scope, limit, context_chars, max_per_paper)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def search_fulltext(q: str, limit: int = 20) -> str:
     """Library-wide full-text search: shorthand for search_text(scope="library")."""
     return await _search_text(q, "library", limit, 240, None)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def set_reading_state(
     paper_ref: str,
     status: str | None = None,
@@ -1047,14 +1102,14 @@ async def set_reading_state(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def get_paper_bibtex(ref: str) -> str:
     """Get a paper's BibTeX entry (the same string used by .bib exports)."""
     result = await _request("GET", f"/v1/papers/{ref}/bibtex", raw=True)
     return json.dumps({"bibtex": result}, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def delete_paper(paper_ref: str, totp_code: str) -> str:
     """Delete a paper (soft delete, restorable by the owner).
 
@@ -1071,7 +1126,7 @@ async def delete_paper(paper_ref: str, totp_code: str) -> str:
     return json.dumps({"deleted": paper_ref, "result": result or "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def merge_papers(source_ref: str, into_ref: str, totp_code: str) -> str:
     """Merge one paper into another (identifiers/authors/state are merged;
     the old id redirects; the source is soft-deleted).
@@ -1099,7 +1154,7 @@ async def merge_papers(source_ref: str, into_ref: str, totp_code: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def create_tag(
     path: str,
     color: str | None = None,
@@ -1118,7 +1173,7 @@ async def create_tag(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def update_tag(
     tag_id: str,
     name: str | None = None,
@@ -1140,7 +1195,7 @@ async def update_tag(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def merge_tags(tag_id: str, into_tag_id: str) -> str:
     """Move every paper from ``tag_id`` onto ``into_tag_id`` and delete the
     source tag. Use it to fold duplicates such as "llm" and "topic/llm"."""
@@ -1148,7 +1203,7 @@ async def merge_tags(tag_id: str, into_tag_id: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def delete_tag(tag_id: str, totp_code: str) -> str:
     """Delete a tag and detach it from every paper. DANGEROUS.
 
@@ -1162,14 +1217,14 @@ async def delete_tag(tag_id: str, totp_code: str) -> str:
     return json.dumps({"deleted": tag_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def remove_tags(paper_ref: str, paths: list[str]) -> str:
     """Remove tag paths from one paper (the inverse of add_tags)."""
     result = await _request("DELETE", f"/v1/papers/{paper_ref}/tags", json={"paths": paths})
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def update_collection(
     collection_id: str,
     name: str | None = None,
@@ -1187,7 +1242,7 @@ async def update_collection(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def move_collection(
     collection_id: str,
     parent_id: str | None = None,
@@ -1202,7 +1257,7 @@ async def move_collection(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def delete_collection(collection_id: str, totp_code: str) -> str:
     """Delete a collection. Papers survive — only the shelf goes away.
 
@@ -1216,7 +1271,7 @@ async def delete_collection(collection_id: str, totp_code: str) -> str:
     return json.dumps({"deleted": collection_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def collection_papers(
     collection_id: str,
     add: list[str] | None = None,
@@ -1252,7 +1307,7 @@ async def collection_papers(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def get_collection_bibtex(collection_id: str) -> str:
     """BibTeX for a collection (and its sub-collections), same text as the
     web UI's .bib export."""
@@ -1260,7 +1315,7 @@ async def get_collection_bibtex(collection_id: str) -> str:
     return json.dumps({"bibtex": text}, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def create_project(
     name: str,
     description: str | None = None,
@@ -1273,7 +1328,7 @@ async def create_project(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def update_project(
     project_id: str,
     name: str | None = None,
@@ -1291,7 +1346,7 @@ async def update_project(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def delete_project(project_id: str, totp_code: str) -> str:
     """Delete a project (its collections and papers stay). DANGEROUS, TOTP-gated."""
     await _request(
@@ -1302,7 +1357,7 @@ async def delete_project(project_id: str, totp_code: str) -> str:
     return json.dumps({"deleted": project_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def project_papers(
     project_id: str,
     add: list[str] | None = None,
@@ -1323,7 +1378,7 @@ async def project_papers(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def project_collections(
     project_id: str,
     add: list[str] | None = None,
@@ -1344,7 +1399,7 @@ async def project_collections(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def get_project_bibtex(project_id: str) -> str:
     """BibTeX for everything in a project, same text as the web UI's export."""
     text = await _request("GET", f"/v1/projects/{project_id}/bibtex", raw=True)
@@ -1356,7 +1411,7 @@ async def get_project_bibtex(project_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def list_views() -> str:
     """Saved "smart views": filter DSL + sort + count, as the web UI sidebar
     shows them. Use a view's id with list_papers(view_id=...) to run it."""
@@ -1364,7 +1419,7 @@ async def list_views() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def validate_filter(filter: dict[str, Any]) -> str:
     """Check a filter DSL payload before saving it into a view or an auto-rule.
     Returns the number of rules it parsed."""
@@ -1372,7 +1427,7 @@ async def validate_filter(filter: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def create_view(
     name: str,
     filter: dict[str, Any] | None = None,
@@ -1396,7 +1451,7 @@ async def create_view(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def update_view(
     view_id: str,
     name: str | None = None,
@@ -1420,21 +1475,21 @@ async def update_view(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def delete_view(view_id: str, totp_code: str) -> str:
     """Delete a saved view. DANGEROUS, TOTP-gated."""
     await _request("DELETE", f"/v1/views/{view_id}", headers={"X-TOTP-Code": totp_code.strip()})
     return json.dumps({"deleted": view_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def list_rules() -> str:
     """Automatic tagging rules and when they run (run_on / enabled / last run)."""
     result = await _request("GET", "/v1/auto-rules")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def create_rule(
     name: str,
     filter: dict[str, Any],
@@ -1455,7 +1510,7 @@ async def create_rule(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def update_rule(
     rule_id: str,
     name: str | None = None,
@@ -1481,21 +1536,21 @@ async def update_rule(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def delete_rule(rule_id: str) -> str:
     """Delete an auto-rule (papers it already changed keep their tags)."""
     await _request("DELETE", f"/v1/auto-rules/{rule_id}")
     return json.dumps({"deleted": rule_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="workflow")
 async def apply_rule(rule_id: str) -> str:
     """Run an auto-rule over the current library; returns {"applied": N}."""
     result = await _request("POST", f"/v1/auto-rules/{rule_id}/apply")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def create_paper(
     kind: str,
     title: str,
@@ -1534,7 +1589,7 @@ async def create_paper(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def bulk_update_papers(
     paper_ids: list[str],
     add_tags: list[str] | None = None,
@@ -1571,21 +1626,21 @@ async def bulk_update_papers(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def list_trash(limit: int = 20) -> str:
     """Papers in the recycle bin (soft-deleted, restorable)."""
     result = await _request("GET", "/v1/papers/trash", params={"limit": limit})
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def restore_paper(paper_ref: str) -> str:
     """Restore a paper from the recycle bin."""
     result = await _request("POST", f"/v1/papers/{paper_ref}/restore")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def list_duplicates(paper_ref: str) -> str:
     """Candidate duplicates of one paper (same title/year/identifiers), each with
     the evidence — check before merging, and prefer merge_papers over deleting."""
@@ -1593,7 +1648,7 @@ async def list_duplicates(paper_ref: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def enrich_paper(paper_ref: str) -> str:
     """Re-run metadata enrichment (abstract, venue, identifiers, citations) for a
     paper whose record looks thin. Queues a job; returns its id."""
@@ -1601,7 +1656,7 @@ async def enrich_paper(paper_ref: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def create_annotation(
     paper_ref: str,
     file_id: str,
@@ -1632,7 +1687,7 @@ async def create_annotation(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def update_annotation(
     annotation_id: str,
     comment: str | None = None,
@@ -1653,21 +1708,21 @@ async def update_annotation(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def delete_annotation(annotation_id: str) -> str:
     """Delete one annotation (soft delete)."""
     await _request("DELETE", f"/v1/annotations/{annotation_id}")
     return json.dumps({"deleted": annotation_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def set_primary_file(file_id: str) -> str:
     """Make one PDF the paper's primary file (the one get_paper_text reads)."""
     result = await _request("POST", f"/v1/files/{file_id}/primary")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="organize")
 async def delete_file(file_id: str, totp_code: str) -> str:
     """Delete one stored PDF. DANGEROUS, TOTP-gated.
 
@@ -1677,7 +1732,7 @@ async def delete_file(file_id: str, totp_code: str) -> str:
     return json.dumps({"deleted": file_id, "result": "204 no content"})
 
 
-@mcp.tool()
+@toolsets.tool(group="read")
 async def whoami() -> str:
     """Which token this server is using, and the scopes it carries.
 
@@ -1688,28 +1743,28 @@ async def whoami() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def list_imports(limit: int = 20) -> str:
     """Recent import jobs (newest first) — what was imported, and how it went."""
     result = await _request("GET", "/v1/imports", params={"limit": limit})
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def cancel_import(import_id: str) -> str:
     """Cancel a running import job; finished items stay imported."""
     result = await _request("POST", f"/v1/imports/{import_id}/cancel")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def retry_import_item(import_id: str, item_id: str) -> str:
     """Retry one failed item of an import job (get_import lists the item ids)."""
     result = await _request("POST", f"/v1/imports/{import_id}/items/{item_id}/retry")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def get_job(job_id: str) -> str:
     """Status of any worker job (reindex, enrich, extract…) by id."""
     result = await _request("GET", f"/v1/jobs/{job_id}")
@@ -1721,7 +1776,7 @@ async def get_job(job_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@toolsets.tool(group="library")
 async def list_authors(q: str | None = None, limit: int = 20, cursor: str | None = None) -> str:
     """Browse the author records (with paper counts), optionally filtered by name."""
     params: dict[str, Any] = {"limit": limit}
@@ -1733,14 +1788,14 @@ async def list_authors(q: str | None = None, limit: int = 20, cursor: str | None
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="library")
 async def get_author(author_id: str) -> str:
     """One author record: aliases, identifiers, and paper count."""
     result = await _request("GET", f"/v1/authors/{author_id}")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="library")
 async def create_author(
     display_name: str,
     family_name: str | None = None,
@@ -1763,7 +1818,7 @@ async def create_author(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="library")
 async def update_author(
     author_id: str,
     display_name: str | None = None,
@@ -1787,21 +1842,21 @@ async def update_author(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def get_venue(venue_id: str) -> str:
     """One venue with its editions, CCF field, and identifiers."""
     result = await _request("GET", f"/v1/venues/{venue_id}")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="import")
 async def get_venue_ranks(venue_id: str) -> str:
     """The CCF/CAS evaluations attached to a venue, with dataset versions."""
     result = await _request("GET", f"/v1/venues/{venue_id}/ranks")
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="library")
 async def create_venue(
     kind: str,
     full_name: str,
@@ -1825,7 +1880,7 @@ async def create_venue(
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool()
+@toolsets.tool(group="library")
 async def update_venue(
     venue_id: str,
     full_name: str | None = None,
@@ -1845,172 +1900,6 @@ async def update_venue(
         return json.dumps({"error": "nothing to update"})
     result = await _request("PATCH", f"/v1/venues/{venue_id}", json=payload)
     return json.dumps(result, ensure_ascii=False)
-
-
-def _mcp_version() -> str | None:
-    try:
-        return package_version("paperdb")
-    except PackageNotFoundError:  # pragma: no cover - always installed when used
-        return None
-
-
-def _integration_target() -> Path:
-    return dsh_integration.resolve_target(os.environ.get(dsh_integration.INTEGRATION_DIR_ENV))
-
-
-def _integration_repo() -> str:
-    return os.environ.get(dsh_integration.REPO_ENV) or dsh_integration.DEFAULT_REPO
-
-
-def _github_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
-
-
-@mcp.tool()
-async def dsh_integration_status() -> str:
-    """Inspect the DSH integration: installed skill/bundle versions, file drift,
-    and the newest GitHub release. Read-only — safe before deciding to upgrade.
-
-    Requires ``PAPERDB_DSH_INTEGRATION_DIR`` (set by the DSH bundle). GitHub
-    being unreachable does not fail the call: ``latest`` is null with ``error``.
-    """
-    try:
-        target = _integration_target()
-    except dsh_integration.IntegrationError as exc:
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
-    installed = dsh_integration.installed_status(target)
-    result: dict[str, Any] = {
-        "ok": True,
-        "mcpServerVersion": _mcp_version(),
-        **installed,
-        "latest": None,
-    }
-    try:
-        async with _github_client() as client:
-            release = await dsh_integration.fetch_release(
-                client, _integration_repo(), token=dsh_integration.github_token()
-            )
-    except (dsh_integration.IntegrationError, httpx.HTTPError) as exc:
-        result["error"] = f"could not read releases: {exc}"
-        return json.dumps(result, ensure_ascii=False)
-    current = installed.get("version")
-    newer = current is None or dsh_integration.parse_version(
-        release.version
-    ) > dsh_integration.parse_version(current)
-    result["latest"] = {
-        "version": release.version,
-        "tag": release.tag,
-        "publishedAt": release.published_at,
-        "prerelease": release.prerelease,
-        "page": release.page_url,
-        "asset": release.asset_name,
-        "sha256": release.asset_sha256,
-        "notes": release.notes[:1200],
-    }
-    result["updateAvailable"] = newer
-    return json.dumps(result, ensure_ascii=False)
-
-
-@mcp.tool()
-async def update_dsh_integration(
-    totp_code: str | None = None,
-    version: str | None = None,
-    dry_run: bool = False,
-) -> str:
-    """Install the latest (or a pinned) DSH integration release: the
-    ``my-paperdb`` skill and the MCP bundle that launches this server.
-
-    Downloads the release asset, verifies its SHA-256 digest and per-file
-    manifest, backs up the current files, then writes atomically. Bundle changes
-    only take effect after DSH restarts; skill changes are picked up by new
-    sessions.
-
-    Writes files on this machine, so applying requires the owner's current
-    6-digit TOTP code (same as deletes). Use ``dry_run=true`` to preview the
-    file plan without a code; ``version`` pins a release (never a downgrade —
-    use rollback_dsh_integration for that).
-    """
-    try:
-        target = _integration_target()
-    except dsh_integration.IntegrationError as exc:
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
-    if not dry_run:
-        await _request(
-            "POST",
-            "/v1/totp/verify",
-            headers={"X-TOTP-Code": (totp_code or "").strip()},
-        )
-    repo = _integration_repo()
-    token = dsh_integration.github_token()
-    try:
-        async with _github_client() as client:
-            release = await dsh_integration.fetch_release(
-                client, repo, version=version, token=token
-            )
-            current = dsh_integration.installed_status(target).get("version")
-            if current is not None:
-                current_key = dsh_integration.parse_version(current)
-                target_key = dsh_integration.parse_version(release.version)
-                if target_key < current_key:
-                    raise dsh_integration.IntegrationError(
-                        f"{release.version} is older than the installed {current}; "
-                        "use rollback_dsh_integration to revert"
-                    )
-                if target_key == current_key and not version:
-                    return json.dumps(
-                        {
-                            "ok": True,
-                            "upToDate": True,
-                            "version": current,
-                            "release": release.tag,
-                            "restartRequired": False,
-                        },
-                        ensure_ascii=False,
-                    )
-            payload = await dsh_integration.download_bytes(client, release.asset_url, token=token)
-            digest = release.asset_sha256 or await dsh_integration.checksum_from_release(
-                client, release, release.asset_name, token=token
-            )
-            if not digest:
-                raise dsh_integration.IntegrationError(
-                    "release carries no SHA-256 digest (asset digest and SHA256SUMS "
-                    "are both missing); refusing to install unverified files"
-                )
-            asset = dsh_integration.verify_asset(
-                payload, expected_sha256=digest, expected_version=release.version
-            )
-        context = {
-            "mcp_command": dsh_integration.default_mcp_command(),
-            "base_url": _BASE_URL,
-            "token": _TOKEN,
-            "target": str(target),
-            "repo": repo,
-        }
-        report = dsh_integration.install(target, asset, release, context=context, dry_run=dry_run)
-    except dsh_integration.IntegrationError as exc:
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
-    return json.dumps(report, ensure_ascii=False)
-
-
-@mcp.tool()
-async def rollback_dsh_integration(totp_code: str | None = None) -> str:
-    """Restore the DSH skill + MCP bundle from the backup taken by the last
-    update_dsh_integration. Requires the owner's current 6-digit TOTP code;
-    restart DSH afterwards when the bundle changed."""
-    try:
-        target = _integration_target()
-    except dsh_integration.IntegrationError as exc:
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
-    await _request(
-        "POST",
-        "/v1/totp/verify",
-        headers={"X-TOTP-Code": (totp_code or "").strip()},
-    )
-    try:
-        report = dsh_integration.rollback(target)
-    except dsh_integration.IntegrationError as exc:
-        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
-    return json.dumps(report, ensure_ascii=False)
 
 
 def main() -> None:

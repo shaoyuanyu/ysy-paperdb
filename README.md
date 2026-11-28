@@ -122,31 +122,48 @@ Next: production smoke + periodic citation sync; optional graph canvas.
 surface as agent tools — import/resolve/BibTeX, reading (text, page images,
 scoped search), organization (tags/collections/projects/views/rules,
 **research workspaces** whose papers stay out of the library until promoted),
-and TOTP-gated deletes/merges. `docs/mcp.md` is the tool-by-tool contract and
-the coverage guard (`tests/test_mcp_coverage.py`) keeps it honest.
+and TOTP-gated deletes/merges. The 93 tools are loaded **by workflow group**
+(`import` / `read` / `organize` / `workflow` / `library`): a session starts with
+the first three and calls `toolset(op="enable", groups=[...])` for the rest, so a
+narrow task does not carry the whole schema. `PAPERDB_MCP_TOOLSETS=all` loads
+everything at startup. `docs/mcp.md` is the tool-by-tool contract; the coverage
+guard (`tests/test_mcp_coverage.py`) checks both directions — every API
+operation is reachable, and no tool calls a path the API does not define.
 Import tools poll their job and return the final per-item status plus the
 paper. Configuration via env: `PAPERDB_MCP_BASE_URL` (default
 `http://127.0.0.1:9720`) and a token from `PAPERDB_MCP_TOKEN`, else the file in
 `PAPERDB_MCP_TOKEN_FILE`, else `~/.config/paperdb/mcp-token`.
 
-The DeepSeek Harness integration lives in `for-agents/` — the
-`@local/dsh-paperdb-mcp` bundle plus the `my-paperdb` skill, hand-edited as
-source and packaged by `scripts/build_dsh_release.py` into the GitHub Release
-asset `paperdb-dsh-<version>.tar.gz` (`.github/workflows/release.yml`, every
-`v*` tag). `paperdb-mcp` installs a release into
-`PAPERDB_DSH_INTEGRATION_DIR` through `dsh_integration_status` /
-`update_dsh_integration` / `rollback_dsh_integration`; applying an update is
-TOTP-gated, verifies the asset digest plus a per-file manifest, and keeps the
-previous files for rollback. The bundle carries no secret: the token lives in
-`~/.config/paperdb/mcp-token` (or wherever `PAPERDB_MCP_TOKEN_FILE` points).
+The MCP server is **harness-neutral**: the same tools, the same
+`PAPERDB_MCP_*` configuration, and no host name anywhere on the tool surface.
+Installing it into a host is a separate, per-host **adapter** under
+`adapters/<host>/`. For DeepSeek Harness that is `adapters/dsh/` — the
+`@local/dsh-paperdb-mcp` bundle plus the `my-paperdb` skill — packaged by
+`scripts/build_adapter_release.py` into the GitHub Release asset
+`paperdb-adapter-dsh-<version>.tar.gz` on every `v*` tag.
+
+Installing and updating is an owner action on the command line, not a tool:
+
+```bash
+paperdb adapter status   --host dsh
+paperdb adapter check    --host dsh
+paperdb adapter update   --host dsh --totp 123456
+paperdb adapter rollback --host dsh --totp 123456
+```
+
+Applying an update is TOTP-gated (verified against `POST /v1/totp/verify`),
+checks the asset digest plus a per-file manifest, writes atomically, keeps the
+previous files for rollback, and never embeds the API token (it lives in
+`~/.config/paperdb/mcp-token`, or wherever `PAPERDB_MCP_TOKEN_FILE` points).
 DSH reads only the installed copy (`~/.dsh/paperdb-integration/`): both
 `~/.agents/skills/my-paperdb` and `.dsh/skills/my-paperdb` are symlinks to its
 skill, and the profile's `@local/dsh-paperdb-mcp` link points at its bundle.
-Edit `for-agents/`, then render+install locally with
-`python scripts/install_dsh_integration.py`. Layout, the source/installed split,
-publishing and trust model: `for-agents/README.md`. The skill teaches agents
-the import ladder (URL → identifier → BibTeX → PDF → WeChat-article-to-title),
-the verify-before-reporting rules, and the OA PDF acquisition paths.
+Edit `adapters/dsh/`, then render+install locally with
+`python scripts/install_adapter.py --host dsh`. Layout, the source/installed
+split, publishing and trust model: `adapters/README.md`,
+`adapters/dsh/README.md`. The skill teaches agents the import ladder (URL →
+identifier → BibTeX → PDF → WeChat-article-to-title), the verify-before-reporting
+rules, and the OA PDF acquisition paths.
 
 Landing-page ingestion (2026-11): `resolve` and all import entry points accept
 any paper page URL. The page is fetched, mined for `citation_*`/og/H1/DOI/

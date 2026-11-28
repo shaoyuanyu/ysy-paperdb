@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from paperdb.adapters.cli import add_parser as add_adapter_parser
 from paperdb.config import get_settings
 from paperdb.db.session import dispose_engine, get_sessionmaker
 from paperdb.errors import ApiError
@@ -159,14 +160,15 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--interval", type=float, default=1.0)
     worker.set_defaults(func=_worker)
 
+    add_adapter_parser(sub)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    settings = get_settings()
-    if args.command == "serve" and settings.env == "prod" and args.reload:
+    if args.command == "serve" and get_settings().env == "prod" and args.reload:
         print("refusing --reload in production", file=sys.stderr)
         return 2
     return int(args.func(args))

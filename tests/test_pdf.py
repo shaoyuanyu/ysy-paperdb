@@ -122,3 +122,63 @@ def test_clean_text_strips_nul_bytes() -> None:
 
     assert clean_text("before\x00after") == "beforeafter"
     assert clean_text("no nul") == "no nul"
+
+
+async def test_page_image_is_rendered_once_and_revalidated(
+    client: httpx.AsyncClient, monkeypatch
+) -> None:
+    """A page image is content-addressed: cached in-process and ETag-stable."""
+    from paperdb.api.v1 import files as files_api
+    from paperdb.pdf import render_cache
+
+    paper = await _paper(client)
+    response = await client.post(
+        f"/v1/papers/{paper['id']}/files",
+        headers=SERVICE,
+        files={"file": ("cached.pdf", _pdf("cached page"), "application/pdf")},
+    )
+    assert response.status_code == 201, response.text
+    file_id = response.json()["file"]["id"]
+    url = f"/v1/files/{file_id}/pages/1/image"
+
+    render_cache.clear()
+    calls: list[int] = []
+    real_render = files_api.render_page_png
+
+    def counting_render(data: bytes, page: int, dpi: int) -> bytes:
+        calls.append(page)
+        return real_render(data, page, dpi)
+
+    monkeypatch.setattr(files_api, "render_page_png", counting_render)
+
+    first = await client.get(url, headers=SERVICE, params={"dpi": 96})
+    assert first.status_code == 200, first.text
+    assert first.content.startswith(b"\x89PNG")
+    assert first.headers["cache-control"].startswith("private")
+    etag = first.headers["etag"]
+    assert etag.startswith('"') and etag.endswith('"')
+
+    # Same request again: served from the in-process cache, not re-rendered.
+    second = await client.get(url, headers=SERVICE, params={"dpi": 96})
+    assert second.content == first.content
+    assert len(calls) == 1
+    assert render_cache.stats()["entries"] >= 1
+
+    # A conditional request is a 304: no render, no body.
+    conditional = await client.get(
+        url, headers={**SERVICE, "If-None-Match": etag}, params={"dpi": 96}
+    )
+    assert conditional.status_code == 304
+    assert conditional.content == b""
+    assert len(calls) == 1
+
+    # A different dpi is a different image, so the renderer runs again.
+    await client.get(url, headers=SERVICE, params={"dpi": 120})
+    assert len(calls) == 2
+    render_cache.clear()
+
+    # Drain the extraction job this upload queued: the worker is global, and a
+    # leftover job would make the next test's run_once() process the wrong one.
+    from paperdb.jobs.worker import run_once
+
+    assert await run_once() is True

@@ -36,6 +36,7 @@ from paperdb.errors import ApiError
 from paperdb.imports.pdf_import import fetch_pdf_bytes
 from paperdb.jobs.queue import enqueue
 from paperdb.papers.service import get_paper
+from paperdb.pdf import render_cache
 from paperdb.pdf.extract import extract_outline, render_page_png
 from paperdb.pdf.service import (
     create_file,
@@ -309,6 +310,7 @@ async def outline_endpoint(
 async def page_image_endpoint(
     file_id: uuid.UUID,
     page: int,
+    request: Request,
     dpi: int = Query(default=144, ge=72, le=300),
     principal: TokenPrincipal = Depends(scoped("pdf:read")),
     session: AsyncSession = Depends(get_session),
@@ -316,19 +318,24 @@ async def page_image_endpoint(
     """Render one PDF page to PNG (figures, tables, equations, layout).
 
     Text extraction cannot carry what a reader sees on the page; this is the
-    other half of reading a paper.
+    other half of reading a paper. The result is a pure function of the PDF's
+    content hash, the page and the dpi, so it is cached in-process and carries
+    a strong ETag — a second read is a 304, not a re-render.
     """
     file = await get_file(session, file_id)
-    data = await get_storage().read_bytes(file.storage_key)
-    try:
-        png = await asyncio.to_thread(render_page_png, data, page, dpi)
-    except ValueError as exc:
-        raise ApiError(422, "invalid_page", str(exc)) from exc
-    return Response(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "private, max-age=60"},
-    )
+    etag = f'"{file.sha256}-p{page}-{dpi}"'
+    headers = {"ETag": etag, "Cache-Control": "private, max-age=86400, immutable"}
+    if request.headers.get("if-none-match") in {etag, f"W/{etag}"}:
+        return Response(status_code=304, headers=headers)
+    png = render_cache.get((file.sha256, page, dpi))
+    if png is None:
+        data = await get_storage().read_bytes(file.storage_key)
+        try:
+            png = await asyncio.to_thread(render_page_png, data, page, dpi)
+        except ValueError as exc:
+            raise ApiError(422, "invalid_page", str(exc)) from exc
+        render_cache.put((file.sha256, page, dpi), png)
+    return Response(content=png, media_type="image/png", headers=headers)
 
 
 @router.get("/files/{file_id}/pages/{page}/text")

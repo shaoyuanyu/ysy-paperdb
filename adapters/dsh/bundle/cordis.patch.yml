@@ -1,0 +1,39 @@
+# Registers the paperdb MCP server (`paperdb-mcp`, stdio) as the agent tools
+# `mcp__paperdb__*` in DeepSeek Harness.
+#
+# SOURCE OF TRUTH: this template lives in the repository
+# (`adapters/dsh/bundle/cordis.patch.yml`) and is packaged into the
+# `paperdb-adapter-dsh-<version>` release asset by
+# `scripts/build_adapter_release.py`. `paperdb adapter update --host dsh`
+# renders the placeholders below for each machine and writes the result into
+# the adapter directory (default ~/.dsh/paperdb-integration).
+#
+# Only harness-neutral settings belong in this bundle: the server knows nothing
+# about DSH. The API token is deliberately NOT here either — the server reads it
+# from the file named by PAPERDB_MCP_TOKEN_FILE (default
+# ~/.config/paperdb/mcp-token), so this file stays secret-free and safe to
+# publish.
+#
+# toolCallTimeoutMs is a ceiling, not a target: import tools wait at most 60s
+# (15s by default) and return a continuation id instead of blocking, so 90s
+# leaves headroom without inviting 2-minute stalls.
+#
+# PAPERDB_MCP_TOOLSETS pins the groups a session starts with; `toolset(
+# op="enable")` loads the rest on demand, and `all` loads everything at once.
+#
+# Placeholders: mcp_command (the paperdb-mcp launcher), base_url (API URL).
+- insert:
+    - id: paperdb-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: paperdb
+        transport: stdio
+        command: {{mcp_command}}
+        env:
+          PAPERDB_MCP_BASE_URL: {{base_url}}
+          PAPERDB_MCP_TOKEN_FILE: "~/.config/paperdb/mcp-token"
+          PAPERDB_MCP_TOOLSETS: "import,read,organize"
+        toolCallTimeoutMs: 90000
+        reconnect:
+          enabled: true
+          maxAttempts: 20

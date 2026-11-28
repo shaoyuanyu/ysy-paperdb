@@ -28,8 +28,8 @@ jobs:
           if tag != f"v{version}":
               raise SystemExit(f"tag {tag} does not match pyproject version {version}")
           PY
-      - name: Build the DSH integration asset
-        run: uv run python scripts/build_dsh_release.py --out dist
+      - name: Build the host adapter asset
+        run: uv run python scripts/build_adapter_release.py --host dsh --out dist
       - name: Build wheel and sdist
         run: uv build --out-dir dist
       - name: Checksums

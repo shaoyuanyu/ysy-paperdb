@@ -13,13 +13,36 @@ web page — always go through the tools.
 
 ## Tools
 
+### 工具是按组加载的（先看这里）
+
+工具表按 workflow 分组，**默认只注册 `import`（入库）+ `read`（阅读/检索）+
+`organize`（标签/集合/批注/批量/删除/合并）**。下列两组默认不在工具表里：
+
+| 组 | 内容 | 何时需要 |
+|---|---|---|
+| `workflow` | 调研工作区、项目、智能视图、自动规则 | 暂存批量调研、建项目、存 filter 视图、配自动规则 |
+| `library` | 作者记录、场馆补建与修正（写） | 改作者信息、补建/修正场馆 |
+
+需要时先开组；返回的 `addedTools` **立刻可调用**（即使宿主没刷新工具表）：
+
+```
+toolset(op="enable", groups=["workflow"])   # 或 ["library"]
+toolset(op="list")                          # 每组说明 + 是否已装 + 成员工具名
+```
+
+遇到"工具不存在"先 `toolset(op="list")` 看是不是没开组，不要直接告诉用户做不到。
+下面工具表里这两组的工具：`list_workspaces`..`apply_rule`（workflow）、
+`list_authors`..`update_venue`（library）；完整清单从 `toolset(op="list")` 取。
+
+### 工具表
+
 The paperdb MCP server (server name `paperdb`) provides:
 
 | Tool | Use |
 |---|---|
 | `mcp__paperdb__resolve` | Read-only preview of any query (DOI / arXiv / title / URL). Returns candidate + confidence + venue/CCF/CAS + `duplicateOf` (identifier match) + `suggestedDuplicateOf` (fuzzy match: exact title + year + first author) + `pdfUrls` + warnings. Never writes. |
-| `mcp__paperdb__import_paper` | Import one paper (query: identifier, title, or landing-page URL). Optional `tags`, `collection_id`, `on_duplicate` ("link" default / "skip" / "create"). Waits for the job, returns the paper. |
-| `mcp__paperdb__import_papers` | Import a list of items (DOIs / arXiv IDs / titles / page URLs) as ONE job, up to 100. Prefer this over looping `import_paper`. |
+| `mcp__paperdb__import_paper` | Import one paper (query: identifier, title, or landing-page URL). Optional `tags`, `collection_id`, `on_duplicate` ("link" default / "skip" / "create"), `wait_seconds` (default 15, max 60, 0 = return now). Returns the paper when it finishes inside the budget, else per-item state + `next`. |
+| `mcp__paperdb__import_papers` | Import a list of items (DOIs / arXiv IDs / titles / page URLs) as ONE job, up to 100. Prefer this over looping `import_paper`. Waits up to `wait_seconds` (default 15, max 60); if the job is still running the result has `next` — continue with `get_import`. |
 | `mcp__paperdb__import_paper_with_pdf` | Landing-page or direct-PDF URL → paper **and** its PDF. Re-runs link to the existing paper; identical PDF bytes always link to the existing entry. |
 | `mcp__paperdb__import_bibtex` | BibTeX string, up to 500 entries. |
 | `mcp__paperdb__search_papers` / `get_paper` | Check what is already in the library (by title / citekey / id). |
@@ -104,9 +127,13 @@ The paperdb MCP server (server name `paperdb`) provides:
    paper is already in the library, or `import_pdf_file(path)` to create the
    paper from the PDF itself — both take an absolute host path (the MCP server
    runs locally, so it can read it). Prefer these over asking the user to drag
-   the file into the web UI. If the file is reachable over http(s) instead,
-   `attach_pdf(paper_ref, url)` / `import_paper_with_pdf(url)` still work.
-   Never `curl` the API with a token from configuration.
+   the file into the web UI. **Local reads are confined to PDFs under
+   `~/Downloads`, `~/Desktop`, `~/Documents`, `/tmp`** (a user can extend that
+   with `PAPERDB_MCP_LOCAL_ROOTS`): if the path is outside, say so and ask the
+   user to move the file or set the variable — do not work around it. If the
+   file is reachable over http(s) instead, `attach_pdf(paper_ref, url)` /
+   `import_paper_with_pdf(url)` still work. Never `curl` the API with a token
+   from configuration.
 5. **The source is a WeChat article / tweet / blog post describing a paper**:
    read the text, extract the paper's title (and authors/venue if stated), then
    `import_paper("<title>")`. Never import the article itself.
@@ -244,22 +271,28 @@ name), CCF level/CAS zone, whether the PDF was stored**. Rules:
 
 ## 维护：升级 paperdb 的 MCP / skill
 
-这套集成（这份 skill + 启动 `paperdb-mcp` 的 DSH bundle）随
-`shaoyuanyu/ysy-paperdb` 的 GitHub Release 一起发布，三个工具负责升级：
+这套集成（这份 skill + 启动 `paperdb-mcp` 的 DSH adapter）随
+`shaoyuanyu/ysy-paperdb` 的 GitHub Release 一起发布。**升级不在工具面上**——工具表
+对宿主中立，安装/升级是本机 owner 动作，走 CLI：
 
-| 工具 | 用途 |
-|---|---|
-| `dsh_integration_status` | 只读：当前安装版本、文件是否被本地改过、最新 release、`updateAvailable` |
-| `update_dsh_integration` | 下载 + 校验 SHA-256 + 备份 + 原子写入。`dry_run=true` 只预览（不需要验证码） |
-| `rollback_dsh_integration` | 回滚到上一次安装前的文件 |
+```bash
+paperdb adapter status   --host dsh            # 离线：已装版本、逐文件漂移
+paperdb adapter check    --host dsh            # 已装 vs 最新 release
+paperdb adapter update   --host dsh --totp 123456
+paperdb adapter rollback --host dsh --totp 123456
+```
 
 规则：
 
 - **写盘前必须向用户要当前 6 位 TOTP**（和删除类操作同一条规则，绝不臆造、复用或猜测）。
-  用户问"有没有新版本"时只调 `dsh_integration_status`，不要主动升级。
-- 更新 bundle 后本轮会话仍跑旧工具，**告诉用户重启 DSH**；skill 的改动对新会话生效。
-- 安装目录由 `PAPERDB_DSH_INTEGRATION_DIR` 指定；`for-agents/` 只是当前这台机器的落点。
-  升级会覆盖本地对 `SKILL.md` / `cordis.patch.yml` 的手改（旧文件在 `.paperdb-update/backups/`）。
+  用户问"有没有新版本"时只跑 `check`，不要主动 `update`。
+- `--dry-run` 免验证码、不写盘，适合先展示将会改动哪些文件。
+- `paperdb` 不在 PATH 时，用与 `paperdb-mcp` 同目录的那个可执行文件（DSH 下通常是
+  `<repo>/.venv/bin/paperdb`）。
+- 更新 bundle 后本轮会话仍跑旧工具，**告诉用户重启宿主**；skill 的改动对新会话生效。
+- 安装目录按 `--dir` → `PAPERDB_ADAPTER_DIR` → 宿主旧变量（DSH 是
+  `PAPERDB_DSH_INTEGRATION_DIR`）→ 宿主默认值解析。升级会覆盖本地对
+  `SKILL.md` / `cordis.patch.yml` 的手改（旧文件在 `.paperdb-adapter/backups/`）。
 
 ## Hard-won facts
 

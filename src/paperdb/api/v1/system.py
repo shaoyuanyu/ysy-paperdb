@@ -33,9 +33,9 @@ async def me(principal: TokenPrincipal = Depends(get_principal)) -> dict[str, ob
 async def totp_verify(_: None = Depends(require_totp)) -> dict[str, bool]:
     """Validate the owner's current TOTP without side effects.
 
-    Agent tools that write locally (the DSH integration updater, for one) ask
-    for the same 6-digit code as destructive operations; the MCP server holds
-    no TOTP secret, so it proves the code here before touching disk.
+    Callers that write on the owner's machine (``paperdb adapter update``, for
+    one) ask for the same 6-digit code as destructive operations; they hold no
+    TOTP secret, so they prove the code here before touching disk.
     """
     return {"ok": True}
 

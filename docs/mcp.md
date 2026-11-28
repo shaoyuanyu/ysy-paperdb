@@ -4,9 +4,43 @@
 
 > **人类在前端能做的操作，agent 必须能用工具做完；做不到的，必须在本文件里写明理由。**
 
-这条规则由 [`tests/test_mcp_coverage.py`](../tests/test_mcp_coverage.py) 强制执行——它枚举 OpenAPI 的每个操作，逐个比对 MCP 实际调用的端点，新增接口若既不包装也不登记理由，测试直接失败。覆盖情况：**117 个 API 操作，96 个由工具直接覆盖，其余 21 个在下方「刻意不开放」中逐条说明**。
+这条规则由 [`tests/test_mcp_coverage.py`](../tests/test_mcp_coverage.py) 强制执行——它枚举 OpenAPI 的每个操作，逐个比对 MCP 实际调用的端点，新增接口若既不包装也不登记理由，测试直接失败。覆盖情况：**117 个 API 操作，95 个由工具直接覆盖，其余 22 个在下方「刻意不开放」中逐条说明**。
 
-工具数量：**96**。传输：stdio（`paperdb-mcp`），令牌用个人 token，scope 决定真实权限（`whoami` 可查）。
+工具数量：**93**，但**不一次性全部注册**——按 workflow 分成 5 组按需加载，默认只装
+`import` + `read` + `organize`（61 个），外加常驻的控制工具 `toolset`（共 62）。
+传输：stdio（`paperdb-mcp`），令牌用个人 token，scope 决定真实权限（`whoami` 可查）。
+
+工具表里没有任何宿主名字：这个 server 面向任何支持 MCP 的 harness/agent，安装到具体宿主见「宿主适配（不在工具面上）」。
+
+## 工具分组与按需加载
+
+工具表按**工作流**分组，而不是按 HTTP 路由：一个对象的所有变更和它自己同组，所以
+"这个任务需要什么" 不需要读 API 才能回答。
+
+| 组 | 内容 | 默认 |
+|---|---|---|
+| `import` | 入库、元数据、PDF 挂载、导入作业、查重、富化、场馆查询（选 `venue_id` 用） | ✅ |
+| `read` | 正文/页图/大纲、全文检索、列表与统计、引用图、批注读取、阅读状态、单篇 BibTeX | ✅ |
+| `organize` | 标签、集合、批注写入、批量修改、回收站、删除/合并、主 PDF | ✅ |
+| `workflow` | 调研工作区、项目、智能视图、自动规则 | ❌ 按需 |
+| `library` | 作者记录、场馆补建与修正（写） | ❌ 按需 |
+
+两种加载方式：
+
+```bash
+# 启动时（宿主适配器或 shell 里）：逗号分隔，或 all
+PAPERDB_MCP_TOOLSETS=import,read,organize,workflow paperdb-mcp
+```
+
+```
+# 会话内：随时把组加进来，返回的 addedTools 立刻可调用
+toolset(op="enable", groups=["workflow"])
+toolset(op="list")        # 每组的中文说明、是否已装、成员工具名
+```
+
+`toolset` 是常驻工具（不在任何组里），所以窄会话永远不会"卡住"在启动时的那几组。
+启用后 server 会发 `notifications/tools/list_changed`；即使宿主没有刷新工具表，
+`enable` 的返回值已经给出了新增工具名，按名字调用仍然可达。
 
 ## 导入
 
@@ -21,6 +55,22 @@
 | `get_import` / `list_imports` | `GET /v1/imports/{id}`、`GET /v1/imports` | 导入进度 / 历史 |
 | `cancel_import` / `retry_import_item` | `POST .../cancel`、`POST .../retry` | 取消、单项重试 |
 | `get_job` | `GET /v1/jobs/{id}` | 任意后台作业状态（抽取、富化） |
+
+### 长任务：等待是预算，不是承诺
+
+导入是后台 job，工具调用不该被 job 卡住：
+
+- `import_paper` / `import_papers` / `import_bibtex` 都有 `wait_seconds`，
+  **默认 15 s，上限 60 s，`0` 立刻返回**；旧版 `import_papers` 的 180 s 默认值比宿主的
+  整个 tool timeout 还长，已删除。
+- 无论是否等到终态，返回里都有 `status`、逐项 `items`、`pendingItems`；
+  还没结束时会多一个 `next`：`Call get_import(import_id="…") to continue.`
+- `get_import` 是"续读"入口，**从不等待**：一次状态读 + 逐项结果，返回同样的
+  `pendingItems` / `next` 结构。
+- `import_paper_with_pdf` 例外：它走的是同步的 `/v1/imports/pdf-url`（抓页面 + 下 PDF），
+  可能耗时数十秒，所以只用于单篇；批量请用 `import_papers`。
+- 宿主侧 tool 超时与本预算的关系：DSH 的 bundle 配 `toolCallTimeoutMs: 90000`，
+  最坏 60 s 等待 + 30 s 余量，不会再出现"工具超时但其实还在跑"的假失败。
 
 ## 阅读
 
@@ -91,18 +141,57 @@ staged 论文不进出库列表与库级搜索，但 **`get_paper_text` / `searc
 | `list_authors` / `get_author` / `create_author` / `update_author` | 作者记录 |
 | `list_venues` / `get_venue` / `get_venue_ranks` / `create_venue` / `update_venue` | 场馆、CCF/CAS 评级、补建场馆 |
 
-## DSH 集成维护（skill + MCP bundle）
+## 宿主适配（不在工具面上）
 
-| 工具 | 端点 | 说明 |
-|---|---|---|
-| `dsh_integration_status` | GitHub Releases API | 只读：已装版本、文件漂移、最新 release、`updateAvailable` |
-| `update_dsh_integration` | `POST /v1/totp/verify` + GitHub | 校验 SHA-256 → 备份 → 原子写入 skill/bundle；`dry_run` 预览不写盘、免验证码 |
-| `rollback_dsh_integration` | `POST /v1/totp/verify` | 用上一次更新的备份回滚 |
+这个 server 对宿主中立：它只说 stdio MCP，只读 `PAPERDB_MCP_*`，工具表里不出现任何
+宿主名字。把 server 装进某个宿主（写宿主的配置文件、装对应 skill）是**本机 owner 动作**，
+走 CLI 而不是 MCP 工具：
 
-更新的是**运行 MCP 的这台机器**上的文件（`PAPERDB_DSH_INTEGRATION_DIR` 下的
-`mcp/dsh-paperdb-mcp/` 与 `skills/my-paperdb/`），所以和删除类操作一样要当前 6 位 TOTP。
-bundle 的改动重启 DSH 后才生效，skill 的改动新会话可见。发布与校验细节见
-[`for-agents/README.md`](../for-agents/README.md)。
+```bash
+paperdb adapter status   --host dsh            # 离线：已装版本、逐文件漂移
+paperdb adapter check    --host dsh            # 已装 vs 最新 release
+paperdb adapter update   --host dsh --totp 123456
+paperdb adapter rollback --host dsh --totp 123456
+```
+
+写盘和删除类操作一样需要当前 6 位 TOTP（先 `POST /v1/totp/verify` 验码，再落盘），
+`--dry-run` 免验证码、不写盘。安装目录按 `--dir` → `PAPERDB_ADAPTER_DIR` → 宿主旧变量
+（DSH 是 `PAPERDB_DSH_INTEGRATION_DIR`）→ 宿主默认值解析。bundle 的改动重启宿主后才生效，
+skill 的改动新会话可见。发行物、校验与信任模型见 [`adapters/README.md`](../adapters/README.md)。
+
+## 本机访问边界
+
+MCP 进程以**你的用户权限**运行，所以边界不写在文档里，而是写在代码里：
+
+| 能力 | 边界 |
+|---|---|
+| 读本机文件 | 只允许 PDF，且必须位于 `~/Downloads`、`~/Desktop`、`~/Documents`、系统临时目录（`/tmp`，macOS 是 `/var/folders/...`）之下；`PAPERDB_MCP_LOCAL_ROOTS`（`:` 分隔）可追加。路径先 `resolve()` 再判定，软链逃逸会被拒 |
+| 写本机文件 | 只有页图缓存 `~/.cache/paperdb/mcp`（`PAPERDB_MCP_CACHE_DIR` / `PAPERDB_MCP_CACHE_MB`，默认 256 MiB，按最旧淘汰） |
+| 改文献库 | 一律走 API，权限 = 那枚 token 的 scope；删除/合并/改宿主配置要当前 6 位 TOTP |
+| 装/升级宿主适配器 | 不在工具面上（`paperdb adapter` CLI），不走 MCP |
+
+越界时错误信息会列出允许的根目录和扩展用的环境变量，方便 agent 直接转述给用户。
+
+## 页图缓存与条件请求
+
+页图是 `(内容 sha256, 页码, dpi)` 的纯函数，而 PDF 是内容寻址的，所以缓存键永不失效：
+
+- **服务端**：`GET /v1/files/{id}/pages/{page}/image` 返回强 `ETag`，条件请求直接 `304`；
+  渲染结果按 `(sha256, page, dpi)` 进进程内 LRU（`PAPERDB_RENDER_CACHE_MB`，默认 64，0 关闭），
+  第二次读同一页不再碰 PyMuPDF。
+- **MCP 侧**：`get_page_image` 把 PNG 落盘缓存，重读同一页零请求、零渲染。
+- **默认 dpi 144 → 120**：整页 A4 的长边仍在多数 provider 的 1568 px 下采样阈值内，
+  体积更小、上下文更省；要看小图细节再显式提高 `dpi`。
+
+### 幂等与读链路缓存（决策）
+
+- **导入天然幂等**：标识符命中 → link 到已有条目；PDF 字节相同 → 内容寻址直接 link；
+  批量导入的 item 可按 id 重试，不会因为重跑而多出条目。
+- **删除是软删除**，可从回收站恢复；`merge_papers` 会保留旧 id 的重定向。
+- **读链路不加缓存**（不做 Redis / 不做查询结果缓存）：所有读直连 Postgres，
+  1w–5w 条的规模下延迟可以忽略，而缓存引入的失效逻辑与"看到的不是最新"风险不成比例。
+  需要省的是**渲染**（PyMuPDF 重新解析整份 PDF）和**传输**（PNG 字节），不是 SQL——
+  这也正是上面那块缓存只覆盖页图的原因。这是一条明确的决策，不是遗漏。
 
 ## 危险操作
 
@@ -124,6 +213,7 @@ bundle 的改动重启 DSH 后才生效，skill 的改动新会话可见。发�
 | `GET /v1/workspaces/{id}/papers` | `get_workspace` 已含论文行 |
 | `DELETE /v1/papers/{ref}/collections` | 由 `bulk_update_papers(remove_collections=...)` 覆盖 |
 | `GET /v1/meta`、`GET /v1/rank-datasets` | 实例诊断信息，不是文献库数据 |
+| `POST /v1/totp/verify` | 由 `paperdb adapter update/rollback --totp` 在 CLI 侧验码，工具面不写宿主文件 |
 
 ## 验收
 

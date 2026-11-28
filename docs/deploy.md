@@ -27,7 +27,7 @@ VPS  ~/paperdb/
 
 ## 2. 发布（日常）
 
-push 到 `main` 即自动发布；`**/*.md` 与 `for-agents/**` 的改动不触发（镜像内容不变）。
+push 到 `main` 即自动发布；`**/*.md` 与 `adapters/**` 的改动不触发（镜像内容不变）。
 
 1. 版本号 = `<UTC 提交日期>-<短 SHA>`，例如 `2026.11.28-f163ae1`
 2. 推标签 `release-v<版本>` → ACR 构建 `ysy-paperdb:<版本>`

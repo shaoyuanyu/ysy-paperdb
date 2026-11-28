@@ -662,7 +662,10 @@ If-Match: "3"            # 可选，乐观锁
 `GET /v1/files/{id}/pages/{page}/image` 用于读出文本层丢掉的东西（图、表、公式、双栏版式）：
 
 - 返回 `image/png`，`dpi` 72–300；`page` 越界或 PDF 加密返回 422 `invalid_page`；
-- 鉴权用 `pdf:read`，与 `/content` 相同，不允许匿名访问。
+- 鉴权用 `pdf:read`，与 `/content` 相同，不允许匿名访问；
+- 响应带强 `ETag: "<sha256>-p<page>-<dpi>"` 与 `Cache-Control: private, max-age=86400, immutable`，
+  `If-None-Match` 命中返回 `304`（无 body）；渲染结果按 `(sha256, page, dpi)`
+  进进程内 LRU（`PAPERDB_RENDER_CACHE_MB`，默认 64，0 关闭），重复读取不重新渲染。
 
 `GET /v1/files/{id}/content` 必须支持：
 
