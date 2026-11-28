@@ -51,25 +51,28 @@ async def run_once(*, settings: Settings | None = None) -> bool:
             await fail(session, job, f"no handler for {job.kind}")
             await session.commit()
             return True
+        # Rollback expires the ORM object, so its id must be captured before the
+        # try block: reading job.id afterwards triggers a lazy refresh on an
+        # async session and raises MissingGreenlet inside the error handler,
+        # masking the real failure.
+        job_id = job.id
         try:
             await handler(session, job, settings)
             await complete(session, job)
             await session.commit()
         except Exception as exc:
-            logger.exception(
-                "job failed id=%s kind=%s", job.id if job else "?", job.kind if job else "?"
-            )
+            logger.exception("job failed id=%s kind=%s", job_id, job.kind)
             # Recording the failure must never kill the worker: a broken
             # connection here (e.g. asyncpg MissingGreenlet during pool ping)
             # used to take the whole process down with the job.
             try:
                 await session.rollback()
-                job = await session.get(Job, job.id)
-                if job is not None:
-                    await fail(session, job, f"{type(exc).__name__}: {exc}")
+                failed_job = await session.get(Job, job_id)
+                if failed_job is not None:
+                    await fail(session, failed_job, f"{type(exc).__name__}: {exc}")
                     await session.commit()
             except Exception:
-                logger.exception("could not record job failure id=%s", job.id if job else "?")
+                logger.exception("could not record job failure id=%s", job_id)
         return True
 
 

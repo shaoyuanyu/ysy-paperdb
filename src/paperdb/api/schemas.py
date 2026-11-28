@@ -814,6 +814,54 @@ class PdfUploadOut(ApiModel):
     job_id: uuid.UUID | None = None
 
 
+class PdfPageTextOut(ApiModel):
+    page: int
+    text: str
+    char_count: int
+
+
+class PdfSectionOut(ApiModel):
+    level: int
+    title: str
+    page: int
+
+
+class PdfOutlineOut(ApiModel):
+    file_id: uuid.UUID
+    page_count: int | None = None
+    sections: list[PdfSectionOut] = Field(default_factory=list)
+
+
+class LibraryStatsOut(ApiModel):
+    """One-call overview of the library, for agents that cannot page through it."""
+
+    papers: int = 0
+    staged: int = 0
+    with_pdf: int = 0
+    text_indexed: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+    collections: int = 0
+    tags: int = 0
+    projects: int = 0
+    workspaces: int = 0
+
+
+class PdfTextOut(ApiModel):
+    """A page range of extracted text, ready for an agent to read.
+
+    ``truncated``/``next_page`` let a caller continue without guessing where
+    the character budget ran out; ``text_status`` is what distinguishes
+    "nothing matched" from "this PDF was never text-extracted".
+    """
+
+    file_id: uuid.UUID
+    text_status: str
+    page_count: int | None = None
+    pages: list[PdfPageTextOut] = Field(default_factory=list)
+    truncated: bool = False
+    next_page: int | None = None
+
+
 class PdfFromUrlRequest(ApiModel):
     url: str
     filename: str | None = None
@@ -964,6 +1012,8 @@ class WorkspacePaperOut(ApiModel):
     kind: str
     promoted: bool = False
     note: str | None = None
+    pdf_count: int = 0
+    text_status: str | None = None
 
 
 class ResearchWorkspaceDetail(ResearchWorkspaceOut):

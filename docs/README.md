@@ -10,6 +10,7 @@
 - [数据模型](data-model.md)
 - [API 契约](api.md)
 - [前端集成](frontend.md)
+- [Agent 接口（MCP）](mcp.md)
 
 > 评审建议：先看 §2（决策）与 §5.1–5.3（paper/venue/评价），再看 `frontend.md` §4（页面）；API 与表结构当参考手册按需查。
 
@@ -256,7 +257,7 @@ flowchart LR
 - 存储：`sha256` 内容寻址，`storage_key = sha256/ab/cd/<hash>.pdf`；DB 存 `(storage_backend, storage_key)`，不存绝对路径。切 OSS 是**一次性迁移**：复制 blob → 回填每行 backend/key → 双读校验 → 切写；不是只改配置。
 - 上传：multipart，默认上限 200 MB；同 hash 直接复用（秒传），不同论文可共享同一物理文件但各自有 `pdf_file` 行（版权/来源元数据不同）。
 - 删除：文件软删；主文件删除时自动提升下一个；物理 blob 由 `gc_blob` 延迟 7 天、按引用计数回收。
-- 全文：worker 用 PyMuPDF 逐页抽取，写入 `pdf_page_text`；页码保留，搜索命中可直接跳到页。英文用 `english` 配置的 tsvector，中文/子串用 `pg_trgm` 兜底；扫描件标记 `text_status='ocr_needed'`，v1 不处理。
+- 全文：worker 用 PyMuPDF 逐页抽取，写入 `pdf_page_text`；页码保留，搜索命中可直接跳到页。英文用 `english` 配置的 tsvector，中文/子串用 `pg_trgm` 兜底；扫描件（所有页都抽不出字符）自动标记 `text_status='ocr_needed'`，v1 不做 OCR。
 - 批注：`page` + `rects`（相对页宽高的 0–1 坐标）+ `quote` + `prefix/suffix`。缩放、换设备、重新渲染都不丢；v1 批注**跟随具体文件版本**，上传新版 PDF 时旧文件与旧批注保留，自动重锚定排到 v1.5。
 - 权限：PDF 字节只经 `/api/library/...` 代理流出，必须 owner cookie；不接受任何公开直链。数据库备份与文件目录都视为私密数据。
 

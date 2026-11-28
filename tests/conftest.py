@@ -93,3 +93,25 @@ async def drain_queue() -> AsyncIterator[None]:
 @pytest.fixture
 def service_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {SERVICE_TOKEN}"}
+
+
+@pytest.fixture
+def mcp_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run MCP tools against the in-process ASGI app instead of a live server.
+
+    The MCP server is a thin HTTP client; pointing its transport at the app
+    exercises the real request shapes (aliases, bodies, query params) without
+    standing up uvicorn. The service token is used so TOTP-gated tools can be
+    driven directly — TOTP itself is covered by test_totp.py.
+    """
+    from paperdb import mcp_server
+
+    def factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+            timeout=30.0,
+        )
+
+    monkeypatch.setattr(mcp_server, "_client", factory)

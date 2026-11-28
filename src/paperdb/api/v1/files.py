@@ -1,14 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, File, Header, Request, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb.api.deps import require_totp, scoped
-from paperdb.api.schemas import PdfFileOut, PdfFromUrlRequest, PdfUploadOut
+from paperdb.api.schemas import (
+    PdfFileOut,
+    PdfFromUrlRequest,
+    PdfOutlineOut,
+    PdfPageTextOut,
+    PdfTextOut,
+    PdfUploadOut,
+)
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.config import Settings, get_settings
 from paperdb.db.models import PdfFile, PdfPageText
@@ -17,6 +36,7 @@ from paperdb.errors import ApiError
 from paperdb.imports.pdf_import import fetch_pdf_bytes
 from paperdb.jobs.queue import enqueue
 from paperdb.papers.service import get_paper
+from paperdb.pdf.extract import extract_outline, render_page_png
 from paperdb.pdf.service import (
     create_file,
     delete_file,
@@ -199,6 +219,116 @@ async def reindex_endpoint(
     job = await enqueue(session, "extract_pdf", {"file_id": str(file.id)})
     await session.commit()
     return {"job_id": job.id}
+
+
+@router.get("/files/{file_id}/text", response_model=PdfTextOut)
+async def text_endpoint(
+    file_id: uuid.UUID,
+    page_from: int = Query(default=1, ge=1, alias="from"),
+    page_to: int | None = Query(default=None, ge=1, alias="to"),
+    max_pages: int = Query(default=100, ge=1, le=500, alias="maxPages"),
+    max_chars: int | None = Query(default=None, ge=1000, le=2000000, alias="maxChars"),
+    principal: TokenPrincipal = Depends(scoped("pdf:read")),
+    session: AsyncSession = Depends(get_session),
+) -> PdfTextOut:
+    """A page range of extracted text.
+
+    The window is measured in pages, not characters: one call reads every page
+    from ``page_from`` up to ``max_pages`` pages (default 100) — i.e. a whole
+    paper unless it is unusually long. ``text_status`` tells the caller whether
+    an empty answer means "no text here" or "not extracted yet".
+    """
+    file = await get_file(session, file_id)
+    window_end = page_from + max_pages - 1
+    stop = window_end if page_to is None else min(window_end, page_to)
+    stmt = (
+        select(PdfPageText)
+        .where(
+            PdfPageText.pdf_file_id == file_id,
+            PdfPageText.page >= page_from,
+            PdfPageText.page <= stop,
+        )
+        .order_by(PdfPageText.page)
+    )
+    rows = list((await session.execute(stmt)).scalars())
+
+    pages: list[PdfPageTextOut] = []
+    used = 0
+    next_page: int | None = None
+    for row in rows:
+        text = row.text or ""
+        # Always return at least one page, even when it alone blows the budget:
+        # a truncated-but-empty answer is useless to the caller.
+        if max_chars is not None and pages and used + len(text) > max_chars:
+            next_page = row.page
+            break
+        pages.append(PdfPageTextOut(page=row.page, text=text, char_count=len(text)))
+        used += len(text)
+    if next_page is None and len(pages) < len(rows):
+        next_page = rows[len(pages)].page
+    if pages and next_page is None:
+        # The window may have ended before the document (max_pages or page_to).
+        last = pages[-1].page
+        boundary = page_to if page_to is not None else (file.page_count or last)
+        if last < boundary:
+            next_page = last + 1
+    return PdfTextOut(
+        file_id=file.id,
+        text_status=file.text_status.value,
+        page_count=file.page_count,
+        pages=pages,
+        truncated=next_page is not None,
+        next_page=next_page,
+    )
+
+
+@router.get("/files/{file_id}/outline", response_model=PdfOutlineOut)
+async def outline_endpoint(
+    file_id: uuid.UUID,
+    principal: TokenPrincipal = Depends(scoped("pdf:read")),
+    session: AsyncSession = Depends(get_session),
+) -> PdfOutlineOut:
+    """The PDF's bookmark tree (section title + page), when it has one.
+
+    An empty ``sections`` list is normal — most papers ship without bookmarks.
+    """
+    file = await get_file(session, file_id)
+    data = await get_storage().read_bytes(file.storage_key)
+    try:
+        sections = await asyncio.to_thread(extract_outline, data)
+    except ValueError as exc:
+        raise ApiError(422, "invalid_pdf", str(exc)) from exc
+    return PdfOutlineOut(
+        file_id=file.id,
+        page_count=file.page_count,
+        sections=sections,  # type: ignore[arg-type]
+    )
+
+
+@router.get("/files/{file_id}/pages/{page}/image")
+async def page_image_endpoint(
+    file_id: uuid.UUID,
+    page: int,
+    dpi: int = Query(default=144, ge=72, le=300),
+    principal: TokenPrincipal = Depends(scoped("pdf:read")),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Render one PDF page to PNG (figures, tables, equations, layout).
+
+    Text extraction cannot carry what a reader sees on the page; this is the
+    other half of reading a paper.
+    """
+    file = await get_file(session, file_id)
+    data = await get_storage().read_bytes(file.storage_key)
+    try:
+        png = await asyncio.to_thread(render_page_png, data, page, dpi)
+    except ValueError as exc:
+        raise ApiError(422, "invalid_page", str(exc)) from exc
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=60"},
+    )
 
 
 @router.get("/files/{file_id}/pages/{page}/text")

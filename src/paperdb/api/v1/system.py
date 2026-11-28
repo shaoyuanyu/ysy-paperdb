@@ -5,10 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from paperdb import __version__
 from paperdb.api.deps import get_principal, scoped
-from paperdb.api.schemas import DatasetOut, MetaOut, StorageOut
+from paperdb.api.schemas import DatasetOut, LibraryStatsOut, MetaOut, StorageOut
 from paperdb.auth.tokens import TokenPrincipal
 from paperdb.config import Settings, get_settings
 from paperdb.db.session import get_session
+from paperdb.papers.stats import library_stats
 from paperdb.venues.service import (
     library_counts,
     list_datasets,
@@ -26,6 +27,16 @@ async def me(principal: TokenPrincipal = Depends(get_principal)) -> dict[str, ob
         "name": principal.name,
         "scopes": sorted(principal.scopes),
     }
+
+
+@router.get("/library/stats", response_model=LibraryStatsOut)
+async def library_stats_endpoint(
+    principal: TokenPrincipal = Depends(scoped("papers:read")),
+    session: AsyncSession = Depends(get_session),
+) -> LibraryStatsOut:
+    """Overview of the library in one call: totals, reading-status spread, and
+    how much of it is actually readable (PDF present / text extracted)."""
+    return LibraryStatsOut(**await library_stats(session))
 
 
 @router.get("/meta", response_model=MetaOut)

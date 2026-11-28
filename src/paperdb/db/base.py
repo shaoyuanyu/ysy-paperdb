@@ -18,6 +18,13 @@ NAMING_CONVENTION = {
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
+    # Fetch server-generated values (created_at / updated_at, and anything else
+    # with server_default/onupdate) in the same INSERT/UPDATE via RETURNING.
+    # Without this, SQLAlchemy expires those attributes at flush time and a
+    # response serializer touching them after commit triggers a lazy refresh —
+    # which raises MissingGreenlet on an async session.
+    __mapper_args__ = {"eager_defaults": True}  # noqa: RUF012 - SQLAlchemy mapper option
+
 
 class UUIDPrimaryKey:
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)

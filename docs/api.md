@@ -285,7 +285,27 @@ If-Match: "3"            # 可选，乐观锁
 | GET | `/healthz` | — | 进程存活，无 DB 依赖 |
 | GET | `/readyz` | — | DB + 存储可用性 |
 | GET | `/v1/meta` | R | 版本、数据集、计数、存储用量、job backlog |
+| GET | `/v1/library/stats` | R | 文献库一览：总量、阅读状态分布、可读性（有 PDF / 已抽文本）、集合/标签/项目/工作区计数 |
 | GET | `/openapi.json` | — | OpenAPI 3.1 |
+
+`GET /v1/library/stats` 响应示例（agent 用来"一眼看清库里有什么"）：
+
+```json
+{
+  "papers": 128,
+  "staged": 12,
+  "withPdf": 96,
+  "textIndexed": 90,
+  "byStatus": {"unread": 80, "queued": 6, "reading": 2, "read": 34, "skimmed": 6},
+  "collections": 9,
+  "tags": 42,
+  "projects": 3,
+  "workspaces": 3
+}
+```
+
+`papers` 只统计已入库（`staged=false`、未删）；staged 论文单列在 `staged`。
+`withPdf` / `textIndexed` 是"可读性"的两个口径——有 PDF、且文本已抽取。
 
 `GET /v1/meta` 响应示例：
 
@@ -615,6 +635,8 @@ If-Match: "3"            # 可选，乐观锁
 | DELETE | `/v1/files/{fileId}` | P | 软删；若是主文件则自动提升下一个；返回 `{deleted, primaryPromotedTo, gcJobId}`，物理 blob 由 `gc_blob` 延迟 7 天回收 |
 | POST | `/v1/files/{fileId}/primary` | P | 设为主文件 |
 | GET | `/v1/files/{fileId}/pages/{page}/text` | P | 单页文本 |
+| GET | `/v1/files/{fileId}/pages/{page}/image` | P | 单页渲染为 PNG，`dpi` 72–300（默认 144）；读图表/公式/版式 |
+| GET | `/v1/files/{fileId}/outline` | P | PDF 书签树（章节标题 + 页码）；无书签返回空数组，不是错误 |
 | POST | `/v1/files/{fileId}/reindex` | P | 重新抽取（异步 job） |
 
 上传响应：
@@ -631,6 +653,15 @@ If-Match: "3"            # 可选，乐观锁
   "jobId": "..."
 }
 ```
+
+`GET /v1/files/{id}/outline` 返回 `{fileId, pageCount, sections:[{level,title,page}]}`。
+**空 `sections` 是正常结果**——大多论文没有书签；调用方应回退到全文检索定位章节，
+不要把它当成解析失败。
+
+`GET /v1/files/{id}/pages/{page}/image` 用于读出文本层丢掉的东西（图、表、公式、双栏版式）：
+
+- 返回 `image/png`，`dpi` 72–300；`page` 越界或 PDF 加密返回 422 `invalid_page`；
+- 鉴权用 `pdf:read`，与 `/content` 相同，不允许匿名访问。
 
 `GET /v1/files/{id}/content` 必须支持：
 
@@ -794,8 +825,9 @@ resolve 候选新增 `suggestedDuplicateOf`（`paperId`/`citekey`/`year`/`yearDe
 | 方法 | 路径 | Scope | 说明 |
 |---|---|---|---|
 | GET | `/v1/search` | R | 跨实体联合搜索（元数据，不含 PDF 正文） |
-| GET | `/v1/search/fulltext` | R | 跨库 PDF 正文搜索；`q` 必填，返回按论文分组的分页命中 |
+| GET | `/v1/search/fulltext` | R | PDF 正文搜索；`q` 必填，可用 `workspaceId` / `paperId` / `fileId` 限定作用域 |
 | GET | `/v1/files/{fileId}/search` | P | 单个 PDF 内搜索；阅读器工具栏用 |
+| GET | `/v1/files/{fileId}/text` | P | 按页返回抽取文本；agent 阅读正文的入口 |
 
 `GET /v1/search` 响应：
 
@@ -812,30 +844,65 @@ resolve 候选新增 `suggestedDuplicateOf`（`paperId`/`citekey`/`year`/`yearDe
 - `types` 可选 `papers,authors,venues,tags`；默认 papers + authors。
 - 每个类型最多 10 条；论文搜索走 `paper.search_tsv` + trigram 融合，**只覆盖标题/摘要/作者**。
 
-`GET /v1/search/fulltext?q=...&limit=20` 响应：
+`GET /v1/search/fulltext` 参数：
+
+| 参数 | 说明 |
+|---|---|
+| `q` | 必填，1–200 字符 |
+| `limit` | 1–100，默认 20 |
+| `workspaceId` | 限定一个调研工作区；**包含尚未转入的 staged 论文** |
+| `paperId` / `fileId` | 限定单篇 / 单个 PDF；同样包含 staged |
+| `includeStaged` | 库级搜索是否包含 staged，默认 `false` |
+| `contextChars` | 片段半径（命中词前后各取多少字符），默认 240，范围 60–2000 |
+| `maxPerPaper` | 每篇最多保留几条命中，默认不限，1–20 |
+
+`workspaceId` / `paperId` / `fileId` 互斥，同时给多个返回 422 `ambiguous_scope`。
+
+响应（命中为扁平列表，按论文创建时间倒序、页号升序）：
 
 ```json
 {
   "query": "speculative decoding",
-  "items": [
-    {
-      "paperId": "...",
-      "title": "...",
-      "fileId": "...",
-      "hits": [
-        {"page": 5, "snippet": "…speculative decoding…", "score": 0.91},
-        {"page": 9, "snippet": "…", "score": 0.44}
-      ]
-    }
+  "hits": [
+    {"paperId": "...", "paperTitle": "...", "fileId": "...", "page": 5, "snippet": "…speculative decoding…"}
   ],
   "hasMore": false
 }
 ```
 
-- 每篇最多 3 页命中；`snippet` 返回**纯文本**（无 HTML/`<mark>`），前端按查询词自行高亮，禁止 `innerHTML` 渲染未转义文本。
-- `GET /v1/files/{fileId}/search?q=...` 返回 `{hits:[{page, snippet, score}]}`，供阅读器内搜索；只查该文件。
+- `snippet` 返回**纯文本**（无 HTML/`<mark>`），前端按查询词自行高亮，禁止 `innerHTML` 渲染未转义文本。
+- `GET /v1/files/{fileId}/search?q=...` 返回同样的 `hits` 结构，只查该文件；同样支持 `contextChars`。
+
+#### 5.14.1 按页读取正文
+
+`GET /v1/files/{fileId}/text?from=1&maxPages=100`
+
+**窗口按页数计**，不按字符：默认一次读完整篇（至多 100 页），没有"字不够就读不完"的问题。
+
+| 参数 | 说明 |
+|---|---|
+| `from` / `to` | 页范围；`from` 默认 1，`to` 省略表示由 `maxPages` 决定窗口终点 |
+| `maxPages` | 页数窗口，默认 100，范围 1–500 —— 主限制 |
+| `maxChars` | 可选字符预算，默认不设、范围 1000–2000000；只作二次保护，不会扩大页窗口 |
+
+```json
+{
+  "fileId": "...",
+  "textStatus": "extracted",
+  "pageCount": 16,
+  "pages": [{"page": 1, "text": "...", "charCount": 1820}],
+  "truncated": false,
+  "nextPage": null
+}
+```
+
+- 16 页的论文默认一次返回全部 16 页；超过 100 页（或显式给了 `to`）时 `truncated=true`、`nextPage` 指向续读页。
+- 至少返回一页，即使调用方把 `maxChars` 设得比单页还小 —— 否则只会拿到空结果。
+- `textStatus` 区分"这页没有文字"与"文本还没抽取"：`pending` / `extracted` / `ocr_needed`（扫描件或纯图 PDF，未做 OCR）/ `failed`。
 
 **语义边界**：`GET /v1/papers?q=` 只搜元数据；要搜 PDF 正文必须走 `fulltext` 端点。前端把两者分开展示（"文献"与"正文命中"），避免用户误以为列表搜索覆盖全文。
+
+**可见性**：库级 `fulltext` 默认排除 staged（调研工作区）论文；一旦用 `workspaceId` / `paperId` / `fileId` 显式限定作用域，就视为论文所有者读取自己的材料，**staged 论文同样被搜索和读取**。列表/导出的隔离不等于阅读的隔离。
 
 ### 5.15 引用图
 

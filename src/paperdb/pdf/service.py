@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,6 +17,7 @@ from paperdb.db.models import (
     PdfFile,
     PdfPageText,
     PdfTextStatus,
+    ResearchWorkspacePaper,
 )
 from paperdb.errors import ApiError
 from paperdb.jobs.queue import enqueue
@@ -148,7 +150,12 @@ async def extract_file(session: AsyncSession, file_id: uuid.UUID) -> PdfFile:
     )
     file.page_count = page_count
     file.text_language = language
-    file.text_status = PdfTextStatus.extracted
+    # A PDF whose every page extracted to whitespace is a scan or an image-only
+    # export: there is no OCR here, so claiming "extracted" would let callers
+    # read an empty paper and conclude the search index is broken.
+    file.text_status = (
+        PdfTextStatus.extracted if any(page.strip() for page in pages) else PdfTextStatus.ocr_needed
+    )
     file.extracted_at = datetime.now(UTC)
     await session.flush()
     return file
@@ -227,9 +234,19 @@ async def search_pages(
     query: str,
     *,
     file_id: uuid.UUID | None = None,
+    paper_id: uuid.UUID | None = None,
+    workspace_id: uuid.UUID | None = None,
     limit: int = 20,
     include_staged: bool = False,
+    max_per_paper: int | None = None,
 ) -> list[dict[str, Any]]:
+    """Search extracted page text.
+
+    Scoping is also a visibility decision. An explicit file/paper/workspace
+    scope is the owner reading their own material, so it reaches staged
+    (research-workspace) papers; only the unscoped library search keeps them
+    hidden unless ``include_staged`` is set.
+    """
     query = query.strip()
     if not query:
         return []
@@ -246,14 +263,26 @@ async def search_pages(
                 PdfPageText.text.ilike(f"%{query}%"),
             ),
         )
+        .order_by(Paper.created_at.desc(), PdfPageText.page)
     )
     if file_id is not None:
         stmt = stmt.where(PdfPageText.pdf_file_id == file_id)
+    elif paper_id is not None:
+        stmt = stmt.where(PdfFile.paper_id == paper_id)
+    elif workspace_id is not None:
+        members = select(ResearchWorkspacePaper.paper_id).where(
+            ResearchWorkspacePaper.workspace_id == workspace_id
+        )
+        stmt = stmt.where(PdfFile.paper_id.in_(members))
     elif not include_staged:
         # Library-wide search must not surface staging-area papers.
         stmt = stmt.where(Paper.staged.is_(False))
-    rows = (await session.execute(stmt.limit(limit))).all()
-    return [
+
+    # Over-fetch when capping per paper: the cap is applied after the SQL
+    # limit, so a single chatty paper must not crowd out the other hits.
+    fetch_limit = limit if max_per_paper is None else min(limit * 8, 500)
+    rows = (await session.execute(stmt.limit(fetch_limit))).all()
+    hits = [
         {
             "paper_id": paper.id,
             "paper_title": paper.title,
@@ -263,6 +292,18 @@ async def search_pages(
         }
         for page_text, file, paper in rows
     ]
+    if max_per_paper is None:
+        return hits[:limit]
+    kept: list[dict[str, Any]] = []
+    seen: Counter[uuid.UUID] = Counter()
+    for hit in hits:
+        if seen[hit["paper_id"]] >= max_per_paper:
+            continue
+        seen[hit["paper_id"]] += 1
+        kept.append(hit)
+        if len(kept) >= limit:
+            break
+    return kept
 
 
 async def media_counts(

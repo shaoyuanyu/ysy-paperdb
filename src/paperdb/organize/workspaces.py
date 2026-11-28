@@ -18,6 +18,7 @@ from paperdb.db.models import (
     Collection,
     CollectionPaper,
     Paper,
+    PdfFile,
     ResearchWorkspace,
     ResearchWorkspacePaper,
 )
@@ -318,6 +319,21 @@ async def workspace_papers(
     if pending_only:
         stmt = stmt.where(ResearchWorkspacePaper.promoted_at.is_(None))
     rows = (await session.execute(stmt)).all()
+    # Whether each paper is actually readable belongs in the survey list: an
+    # agent that has to call get_paper once per row just to learn which ones
+    # have an extracted PDF burns a dozen round-trips for nothing.
+    files: dict[uuid.UUID, list[PdfFile]] = {}
+    paper_ids = [paper.id for _, paper in rows]
+    if paper_ids:
+        file_rows = (
+            await session.execute(
+                select(PdfFile)
+                .where(PdfFile.paper_id.in_(paper_ids), PdfFile.deleted_at.is_(None))
+                .order_by(PdfFile.is_primary.desc(), PdfFile.created_at)
+            )
+        ).scalars()
+        for file in file_rows:
+            files.setdefault(file.paper_id, []).append(file)
     return [
         {
             "paper_id": paper.id,
@@ -327,6 +343,8 @@ async def workspace_papers(
             "kind": paper.kind.value,
             "promoted": membership.promoted_at is not None,
             "note": membership.note,
+            "pdf_count": len(files.get(paper.id, [])),
+            "text_status": files[paper.id][0].text_status.value if files.get(paper.id) else None,
         }
         for membership, paper in rows
     ]
