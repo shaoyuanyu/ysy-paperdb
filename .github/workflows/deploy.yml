@@ -1,32 +1,35 @@
 name: deploy
 
-# Deploy paperdb to the homepage VPS on every push to main.
+# Deploy paperdb to the homepage VPS, the same way the web repo does it:
 #
-# The VPS runs the stack with docker compose from a plain checkout-like
-# directory at ~/paperdb (no .git). So this workflow does two things:
-#   1. rsync the repository into ~/paperdb (source delivery),
-#   2. docker compose up -d --build there (the actual deployment).
-# Containers, image, volumes and the compose file are unchanged — only the
-# source files on the box are replaced.
+#   push to main → tag release-v<version> → ACR builds the image (GitHub App
+#   watches this repo) → this workflow waits for the image → SSH to the VPS,
+#   pull it, retag as paperdb:prod, `docker compose up -d` (no build on the VPS).
 #
-# Required repository secrets:
-#   VPS_HOST      hostname/IP of the VPS
-#   VPS_USER      ssh user (owns ~/paperdb)
-#   VPS_SSH_KEY   private key authorized on that host
+# Why not build on the VPS: the box is in China and both Docker Hub
+# (python:3.12-slim) and PyPI (files.pythonhosted.org) stall or truncate; a
+# local `--build` failed after ~17 min with corrupted wheels. The image is
+# therefore built by ACR and the VPS only pulls from the domestic registry.
 #
-# Rollback: workflow_dispatch with `ref` = the commit/tag to redeploy; the
-# runner checks that ref out and rsyncs+builds it the same way.
+# Required repo variables: REGISTRY, IMAGE_NAMESPACE (same values as the web repo)
+# Required repo secrets:   REGISTRY_USERNAME, REGISTRY_PASSWORD  (ACR credentials)
+#                          VPS_HOST, VPS_USER, VPS_SSH_KEY
+# Optional:                AUTOMERGE_TOKEN — PAT used to push the tag, so ACR's
+#                          GitHub App reliably receives the event (the web repo
+#                          does the same; GITHUB_TOKEN is the fallback).
+#
+# Rollback: workflow_dispatch with `version` = an earlier image tag.
 
 on:
   push:
     branches: [main]
     paths-ignore:
       - "**/*.md"
-      - "for-agents/**"      # DSH bundle + skill: not part of the API image
+      - "for-agents/**"
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Rollback: commit/tag to deploy (default: the pushed commit)"
+      version:
+        description: "Rollback: image version to deploy (e.g. 2026.11.28-abc1234)"
         required: false
         type: string
 
@@ -34,64 +37,139 @@ concurrency:
   group: paperdb-deploy
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push release-v* tags to trigger the ACR build
     env:
-      VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_USER: ${{ secrets.VPS_USER }}
+      PUSH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref || github.sha }}
 
-      - name: Configure SSH
+      - name: Check configuration
+        id: config
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          missing=""
+          [ -z "$REGISTRY" ] && missing="$missing REGISTRY(var)"
+          [ -z "$NAMESPACE" ] && missing="$missing IMAGE_NAMESPACE(var)"
+          [ -z "$REGISTRY_USERNAME" ] && missing="$missing REGISTRY_USERNAME(secret)"
+          [ -z "$REGISTRY_PASSWORD" ] && missing="$missing REGISTRY_PASSWORD(secret)"
+          [ -z "$VPS_HOST" ] && missing="$missing VPS_HOST(secret)"
+          if [ -n "$missing" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::deploy skipped, missing:$missing"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve version
+        if: steps.config.outputs.ready == 'true'
+        env:
+          IN_VERSION: ${{ github.event.inputs.version }}
+          REGISTRY: ${{ vars.REGISTRY }}
+          NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
+        run: |
+          if [ -n "$IN_VERSION" ]; then
+            VERSION="$IN_VERSION"
+            echo "rollback mode: $VERSION (no tag pushed)"
+            echo "SKIP_BUILD=1" >> "$GITHUB_ENV"
+          else
+            VERSION="$(TZ=UTC git show -s --format=%cd --date=format:%Y.%m.%d HEAD)-${GITHUB_SHA:0:7}"
+            echo "version: $VERSION"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "IMAGE=$REGISTRY/$NAMESPACE/paperdb:$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=release-v$VERSION" >> "$GITHUB_ENV"
+
+      - name: Login to ACR
+        if: steps.config.outputs.ready == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Push release tag (triggers the ACR build)
+        if: steps.config.outputs.ready == 'true' && env.SKIP_BUILD != '1'
+        run: |
+          set -e
+          if git ls-remote --tags origin "refs/tags/$RELEASE_TAG" | grep -q .; then
+            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+              echo "tag and image already exist — reusing $VERSION"
+              exit 0
+            fi
+            echo "tag exists but image is missing — re-pushing to rebuild"
+            git push origin ":refs/tags/$RELEASE_TAG" || true
+          fi
+          if [ -n "$PUSH_TOKEN" ]; then
+            git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
+          fi
+          git tag -f "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+          echo "pushed $RELEASE_TAG"
+
+      - name: Wait for the ACR build
+        if: steps.config.outputs.ready == 'true' && env.SKIP_BUILD != '1'
+        run: |
+          deadline=$((SECONDS + 2700))   # ACR build limit is 30 min
+          while true; do
+            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+              echo "image ready: $IMAGE"
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::ACR did not finish $IMAGE within 45 min — check the build log in the ACR console"
+              exit 1
+            fi
+            sleep 20
+          done
+
+      - name: Sync the prod compose file
+        if: steps.config.outputs.ready == 'true'
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
           install -d -m 700 ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes \
-            "$VPS_USER@$VPS_HOST" 'echo "ssh ok: $(hostname)"'
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          scp -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
+            deploy/paperdb-compose.prod.yml \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:~/paperdb/deploy/paperdb-compose.prod.yml"
 
-      - name: Sync source to the VPS
+      - name: Deploy over SSH
+        if: steps.config.outputs.ready == 'true'
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          REGISTRY: ${{ vars.REGISTRY }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          # --delete keeps removed files from lingering (a stale .py would be
-          # imported); user-local files are excluded so they survive.
-          rsync -az --delete \
-            --exclude='.git' \
-            --exclude='.env' \
-            --exclude='datasets/' \
-            --exclude='data/' \
-            --exclude='*.log' \
-            --exclude='build.pid' \
-            --exclude='Dockerfile.hotfix' \
-            --exclude='.test-storage/' \
-            --exclude='.venv/' \
-            --exclude='.deploy-rev' \
-            -e "ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes" \
-            ./ "$VPS_USER@$VPS_HOST:~/paperdb/"
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$VPS_USER@$VPS_HOST" \
-            "echo '${{ github.sha }}' > ~/paperdb/.deploy-rev"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Build and restart
-        run: |
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "REGISTRY='$REGISTRY' NS='${{ vars.IMAGE_NAMESPACE }}' VERSION='$VERSION' \
+             REG_USER='$REGISTRY_USERNAME' REG_PASS='$REGISTRY_PASSWORD' bash -s" <<'REMOTE'
           set -euo pipefail
+          echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+          IMAGE="$REGISTRY/$NS/paperdb:$VERSION"
+          docker pull "$IMAGE"
+          docker tag "$IMAGE" paperdb:prod
+
           cd ~/paperdb
-          # The VPS is in China: pypi.org / files.pythonhosted.org time out
-          # mid-download, so build against a domestic mirror. Wire format is
-          # standard PEP 503, only used at build time.
-          export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-          export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-          echo "deploying $(cat .deploy-rev 2>/dev/null || echo '?')"
-          docker compose --env-file .env -f deploy/paperdb-compose.prod.yml up -d --build
+          docker compose --env-file .env -f deploy/paperdb-compose.prod.yml up -d
 
           for i in $(seq 1 90); do
             if curl -fsS --max-time 3 http://127.0.0.1:9720/readyz >/dev/null 2>&1; then
@@ -105,12 +183,12 @@ jobs:
             fi
             sleep 2
           done
-
-          curl -fsS http://127.0.0.1:9720/healthz >/dev/null
-          echo "healthz OK"
+          curl -fsS http://127.0.0.1:9720/healthz >/dev/null && echo "healthz OK"
+          echo "deployed $VERSION"
           REMOTE
 
       - name: Smoke test (public)
+        if: steps.config.outputs.ready == 'true'
         run: |
           for i in $(seq 1 10); do
             if curl -fsS --max-time 5 https://library.shaoyuanyu.cn/healthz; then
