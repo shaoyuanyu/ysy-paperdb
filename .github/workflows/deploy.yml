@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           cd ~/paperdb
           echo "deploying $(cat .deploy-rev 2>/dev/null || echo '?')"
-          docker compose -f deploy/paperdb-compose.prod.yml up -d --build
+          docker compose --env-file .env -f deploy/paperdb-compose.prod.yml up -d --build
 
           for i in $(seq 1 90); do
             if curl -fsS --max-time 3 http://127.0.0.1:9720/readyz >/dev/null 2>&1; then
@@ -95,7 +95,7 @@ jobs:
             fi
             if [ "$i" = 90 ]; then
               echo "API did not become ready"
-              docker compose -f deploy/paperdb-compose.prod.yml logs --tail=80 paperdb-api || true
+              docker compose --env-file .env -f deploy/paperdb-compose.prod.yml logs --tail=80 paperdb-api || true
               exit 1
             fi
             sleep 2
