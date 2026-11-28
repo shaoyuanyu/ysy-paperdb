@@ -2,20 +2,20 @@ name: deploy
 
 # Deploy paperdb to the homepage VPS on every push to main.
 #
-# Topology: the VPS keeps a checkout at ~/paperdb and runs the stack with
-# deploy/paperdb-compose.prod.yml (see docs/deploy.md). Unlike the web repo this
-# does NOT go through ACR: the image is rebuilt on the VPS from the checkout,
-# which keeps the pipeline short (no registry, no cross-border push) and matches
-# how the stack has been operated by hand.
+# The VPS runs the stack with docker compose from a plain checkout-like
+# directory at ~/paperdb (no .git). So this workflow does two things:
+#   1. rsync the repository into ~/paperdb (source delivery),
+#   2. docker compose up -d --build there (the actual deployment).
+# Containers, image, volumes and the compose file are unchanged — only the
+# source files on the box are replaced.
 #
-# Required repository secrets (same names as the web repo, but they must be set
-# on *this* repo — GitHub secrets are per-repository):
+# Required repository secrets:
 #   VPS_HOST      hostname/IP of the VPS
-#   VPS_USER      ssh user
-#   VPS_SSH_KEY   private key authorized for that user
-# Without them the workflow skips instead of failing red on every push.
+#   VPS_USER      ssh user (owns ~/paperdb)
+#   VPS_SSH_KEY   private key authorized on that host
 #
-# Rollback: workflow_dispatch with `ref` = the commit/tag to redeploy.
+# Rollback: workflow_dispatch with `ref` = the commit/tag to redeploy; the
+# runner checks that ref out and rsyncs+builds it the same way.
 
 on:
   push:
@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Rollback: commit/tag to deploy (default: current main)"
+        description: "Rollback: commit/tag to deploy (default: the pushed commit)"
         required: false
         type: string
 
@@ -40,73 +40,77 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
     steps:
-      - name: Check configuration
-        id: config
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-        run: |
-          if [ -z "$VPS_HOST" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::VPS_HOST is not set on this repo — skipping deploy."
-            echo "Configure VPS_HOST / VPS_USER / VPS_SSH_KEY to enable auto-deploy."
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Deploy over SSH
-        if: steps.config.outputs.ready == 'true'
-        uses: appleboy/ssh-action@v1
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          command_timeout: 20m
-          script: |
-            set -euo pipefail
-            REF="${{ github.event.inputs.ref || github.sha }}"
-            cd "$HOME/paperdb"
+          ref: ${{ github.event.inputs.ref || github.sha }}
 
-            echo "== fetching $REF =="
-            git fetch --all --prune --tags
-            git checkout --force "$REF" 2>/dev/null || git checkout --force origin/main
-            git clean -fd -e .env -e datasets
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes \
+            "$VPS_USER@$VPS_HOST" 'echo "ssh ok: $(hostname)"'
 
-            # docker or podman, whichever this host has
-            if command -v docker >/dev/null 2>&1; then
-              COMPOSE="docker compose"
-            else
-              COMPOSE="podman compose"
+      - name: Sync source to the VPS
+        run: |
+          # --delete keeps removed files from lingering (a stale .py would be
+          # imported); user-local files are excluded so they survive.
+          rsync -az --delete \
+            --exclude='.git' \
+            --exclude='.env' \
+            --exclude='datasets/' \
+            --exclude='data/' \
+            --exclude='*.log' \
+            --exclude='build.pid' \
+            --exclude='Dockerfile.hotfix' \
+            --exclude='.test-storage/' \
+            --exclude='.venv/' \
+            --exclude='.deploy-rev' \
+            -e "ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes" \
+            ./ "$VPS_USER@$VPS_HOST:~/paperdb/"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$VPS_USER@$VPS_HOST" \
+            "echo '${{ github.sha }}' > ~/paperdb/.deploy-rev"
+
+      - name: Build and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd ~/paperdb
+          echo "deploying $(cat .deploy-rev 2>/dev/null || echo '?')"
+          docker compose -f deploy/paperdb-compose.prod.yml up -d --build
+
+          for i in $(seq 1 90); do
+            if curl -fsS --max-time 3 http://127.0.0.1:9720/readyz >/dev/null 2>&1; then
+              echo "ready after ${i} tries"
+              break
             fi
+            if [ "$i" = 90 ]; then
+              echo "API did not become ready"
+              docker compose -f deploy/paperdb-compose.prod.yml logs --tail=80 paperdb-api || true
+              exit 1
+            fi
+            sleep 2
+          done
 
-            echo "== rebuilding and restarting =="
-            $COMPOSE -f deploy/paperdb-compose.prod.yml up -d --build
-
-            echo "== waiting for the API =="
-            for i in $(seq 1 60); do
-              if curl -fsS --max-time 3 http://127.0.0.1:9720/readyz >/dev/null 2>&1; then
-                echo "ready after ${i}s"
-                break
-              fi
-              sleep 2
-              if [ "$i" = 60 ]; then
-                echo "::error::API did not become ready in 120s"
-                $COMPOSE -f deploy/paperdb-compose.prod.yml logs --tail=80 paperdb-api || true
-                exit 1
-              fi
-            done
-
-            curl -fsS http://127.0.0.1:9720/healthz >/dev/null
-            echo "== deployed $(git rev-parse --short HEAD) =="
+          curl -fsS http://127.0.0.1:9720/healthz >/dev/null
+          echo "healthz OK"
+          REMOTE
 
       - name: Smoke test (public)
-        if: steps.config.outputs.ready == 'true'
         run: |
-          # The API is proxied by nginx; /healthz is the only anonymous route.
           for i in $(seq 1 10); do
             if curl -fsS --max-time 5 https://library.shaoyuanyu.cn/healthz; then
               echo; echo "public health OK"; exit 0
             fi
             sleep 5
           done
-          echo "::warning::public /healthz did not answer; the VPS checks passed, verify nginx/proxy manually"
+          echo "::warning::public /healthz did not answer; VPS checks passed, verify nginx manually"
