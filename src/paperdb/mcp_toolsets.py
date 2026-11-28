@@ -18,7 +18,7 @@ is answerable without reading the API surface.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +61,7 @@ class ToolSpec:
 
 _specs: dict[str, ToolSpec] = {}
 _server: FastMCP | None = None
+_wrap: Callable[[Any], Any] | None = None
 _enabled: set[str] = set()
 _registered: set[str] = set()
 
@@ -85,10 +86,22 @@ def resolve_groups(raw: str | None) -> tuple[str, ...]:
     return tuple(names)
 
 
-def bind(server: FastMCP, groups: Iterable[str] | None = None) -> None:
-    """Attach the server and decide which groups start out loaded."""
-    global _server
+def bind(
+    server: FastMCP,
+    groups: Iterable[str] | None = None,
+    wrap: Callable[[Any], Any] | None = None,
+) -> None:
+    """Attach the server and decide which groups start out loaded.
+
+    ``wrap``, when given, is applied to every tool function at registration
+    time.  The server uses it to decorate tool results (update notices)
+    without the tool declarations — or this module — knowing about it; the
+    wrapper preserves each function's name, docstring and signature, so the
+    generated schemas are unchanged.
+    """
+    global _server, _wrap
     _server = server
+    _wrap = wrap
     chosen = tuple(groups) if groups is not None else resolve_groups(os.environ.get(TOOLSETS_ENV))
     _enabled.update(chosen)
 
@@ -113,7 +126,8 @@ def _register(spec: ToolSpec) -> None:
         raise ToolsetError("toolset.bind() must be called before tools are declared")
     if spec.name in _registered:
         return
-    _server.add_tool(spec.fn)
+    fn = _wrap(spec.fn) if _wrap is not None else spec.fn
+    _server.add_tool(fn)
     _registered.add(spec.name)
 
 

@@ -84,6 +84,16 @@ repository — so the bundle stays publishable and the secret never touches git
 (a repo-local `mcp-token` is git-ignored as a safety net). `chmod 600` the file;
 rotate the token in the web UI if it ever leaks.
 
+## Update notices
+
+The rendered bundle also sets `PAPERDB_MCP_ADAPTER_VERSION` (the `{{version}}`
+placeholder): the release this integration was installed from. The server
+compares it with newer releases — at most once per TTL, cached, never blocking
+a tool — and appends an `updateNotice` to the next text tool result; the agent
+then asks the user (once, ~60 s wait, skip on silence) per the protocol in
+`skills/my-paperdb/SKILL.md`. The update itself still runs through
+`paperdb adapter update`, TOTP and all.
+
 ## Publishing a release
 
 1. Bump the version in `pyproject.toml` **and** `src/paperdb/__init__.py`.

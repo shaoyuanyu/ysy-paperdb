@@ -431,17 +431,38 @@ def default_mcp_command() -> str:
     return "paperdb-mcp"
 
 
+def _package_version() -> str:
+    """The installed distribution's version, or ``""`` when unknowable.
+
+    The empty string (not a placeholder like "0.0.0") keeps a dev render from
+    claiming a version it does not have: the server treats an empty
+    ``PAPERDB_MCP_ADAPTER_VERSION`` as "unknown" and stays silent instead of
+    flagging every release as newer.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("paperdb")
+    except PackageNotFoundError:
+        return ""
+
+
 def build_context(
     target: Path,
     *,
     base_url: str | None = None,
     repo: str | None = None,
     mcp_command: str | None = None,
+    version: str | None = None,
 ) -> dict[str, str]:
     """Template values for a host bundle.
 
     Deliberately holds no secret: the server reads its token from the token
-    file, so a rendered bundle stays safe to publish and to diff.
+    file, so a rendered bundle stays safe to publish and to diff.  ``version``
+    is the release being installed; the bundle passes it to the server as
+    ``PAPERDB_MCP_ADAPTER_VERSION`` so update notices compare against the
+    release the integration actually came from.  Unset (a dev render) falls
+    back to the installed distribution's version, or "" when unknown.
     """
     from paperdb import mcp_config
 
@@ -450,6 +471,7 @@ def build_context(
         "base_url": (base_url or mcp_config.base_url()).rstrip("/"),
         "target": str(target),
         "repo": repo or repo_name(),
+        "version": version or _package_version(),
     }
 
 

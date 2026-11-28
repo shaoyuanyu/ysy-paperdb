@@ -105,6 +105,8 @@ async def test_stdio_session_can_load_more_groups() -> None:
         "HOME": os.environ.get("HOME", ""),
         "PAPERDB_MCP_TOKEN": "test-token",
         "PAPERDB_MCP_TOOLSETS": "import,read",
+        # Hermetic: no update checks (and no real cache) in the spawned server.
+        "PAPERDB_MCP_UPDATE_TTL": "0",
     }
     notifications: list[object] = []
 

@@ -294,6 +294,34 @@ paperdb adapter rollback --host dsh --totp 123456
   `PAPERDB_DSH_INTEGRATION_DIR`）→ 宿主默认值解析。升级会覆盖本地对
   `SKILL.md` / `cordis.patch.yml` 的手改（旧文件在 `.paperdb-adapter/backups/`）。
 
+## 更新提示协议：工具输出里的 `updateNotice`
+
+服务器自己会检测新 release：查 GitHub 最多每 6 小时一次（`PAPERDB_MCP_UPDATE_TTL`
+可调，0 关闭），结果缓存在 `~/.cache/paperdb/mcp/update-check.json`，**不是每次工具
+调用都查**，检查也从不阻塞工具返回。有新版本且已装版本落后时（已装版本来自 bundle
+渲染的 `PAPERDB_MCP_ADAPTER_VERSION`），下一个文本类工具结果会带提示：JSON 对象
+结果末尾多一个 `updateNotice` 字段（含 `installed` / `latest` / `page` / `notes` /
+`instructions`），数组或纯文本结果末尾多一行 `[paperdb-update] …`。每个服务器进程对
+同一个 latest 版本只提示一次；`get_page_image` 这类返回图片的工具不带提示，会顺延到
+下一个文本结果。**提示不是错误**——照常完成当前工具步骤，不要当失败处理。
+
+收到提示后的协议（服务器提示的场景，用户没有主动要求更新）：
+
+1. 完成当前工具步骤后**立即**处理，不要拖到任务结束。在回复文本里直接问用户：
+   「paperdb 有新版本 `<latest>`（当前 `<installed>`），要现在更新吗？」可附
+   `page` 链接和 `notes` 要点。**不要用 ask_user_question**（它会无限期阻塞）。
+2. 询问后调用 `wait_agent(timeout_ms=60000)` 等待用户回复（最多 60 秒）：
+   - 用户同意 → 走上面的 TOTP 更新流程（要当前 6 位码 → `paperdb adapter update
+     --host dsh --totp <code>` → 提醒重启宿主）；
+   - 用户拒绝 → 跳过，继续原任务，本会话不再问；
+   - 超时（`timedOut: true`）→ 视为未回复，**直接跳过并继续原任务**，不要再问、
+     不要再等；若用户稍后才回复同意，仍然可以执行更新。
+3. 子代理（subagent / workflow fan-out）没有与用户对话的通道：收到提示只在汇报里
+   提一句「检测到 paperdb 更新 `<latest>`」，等待与询问由主会话决定。
+4. **用户主动要求的更新不受 60 秒限制**：「帮我更新 paperdb」「看看有没有新版本」
+   时，先 `paperdb adapter check --host dsh`，再按用户意愿走 TOTP 更新流程——等用户
+   提供验证码时可以一直等（这是用户发起的，不存在跳过）。
+
 ## Hard-won facts
 
 - **DBLP is behind an anti-bot challenge** (Anubis, JS proof-of-work). The

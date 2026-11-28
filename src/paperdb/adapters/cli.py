@@ -233,7 +233,11 @@ async def _update(adapter: adapters.Adapter, args: argparse.Namespace) -> dict[s
         verified = adapters.verify_asset(
             adapter, payload, expected_sha256=digest, expected_version=release.version
         )
-    context = adapters.build_context(target, base_url=args.base_url, repo=args.repo)
+    # The rendered bundle records the release being installed (the server
+    # compares it with later releases for its update notices).
+    context = adapters.build_context(
+        target, base_url=args.base_url, repo=args.repo, version=release.version
+    )
     return adapters.install(
         adapter, target, verified, release, context=context, dry_run=args.dry_run
     )

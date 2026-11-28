@@ -159,6 +159,32 @@ paperdb adapter rollback --host dsh --totp 123456
 （DSH 是 `PAPERDB_DSH_INTEGRATION_DIR`）→ 宿主默认值解析。bundle 的改动重启宿主后才生效，
 skill 的改动新会话可见。发行物、校验与信任模型见 [`adapters/README.md`](../adapters/README.md)。
 
+## 更新提示（`updateNotice`）
+
+server 自己会检测新 release，并把「有更新」带进工具输出，让 agent 能在合适的时机问用户
+要不要升级——用户不必主动问「有没有新版本」。检测保持宿主中立、且永远不拖慢工具调用：
+
+- **频率**：查 `https://api.github.com/repos/<repo>/releases/latest` 最多每 6 小时一次
+  （`PAPERDB_MCP_UPDATE_TTL` 秒数可调，`0` 整体关闭）。结果缓存为
+  `~/.cache/paperdb/mcp/update-check.json`（随 `PAPERDB_MCP_CACHE_DIR`），所以 server
+  重启也不会立刻重查；HTTP 404（还没有发布过 release）当作合法的「无更新」缓存整个
+  TTL，网络失败则按更短的退避窗口（5–30 分钟）重试，不会打爆 GitHub。
+- **触发**：缓存过期后的第一次工具调用在后台安排检查（单飞，同一时刻至多一个），
+  当次调用仍用旧缓存立即返回，检查从不阻塞工具。
+- **比较**：已装版本来自 bundle 渲染的 `PAPERDB_MCP_ADAPTER_VERSION`（即
+  `paperdb adapter check` 比对的同一版本），缺失时退回已安装的 `paperdb` 发行版版本，
+  再退回 `__version__`；都拿不到就保持沉默，绝不瞎猜。release 还必须带某个宿主的
+  `paperdb-adapter-<host>-<version>.tar.gz` 资产才算可更新。
+- **呈现**：有更新且已装版本落后时，下一个文本类工具结果带提示——JSON 对象结果末尾
+  多一个 `updateNotice` 字段（`installed` / `latest` / `tag` / `page` / `notes` /
+  `instructions`），数组或纯文本结果末尾多一行 `[paperdb-update] …`。每个 server 进程对
+  同一个 latest 版本只提示一次；返回图片的工具（`get_page_image`）不带提示，顺延到
+  下一个文本结果。提示里只有版本信息与中性指令，**升级动作本身仍然只走 CLI**。
+
+agent 收到提示后的行为协议（何时问用户、等 60 秒、无回复即跳过、用户主动要求不受限）
+写在宿主 skill 里（DSH 见 `adapters/dsh/skills/my-paperdb/SKILL.md` 的
+「更新提示协议」一节），与本节的中性机制互为表里。
+
 ## 本机访问边界
 
 MCP 进程以**你的用户权限**运行，所以边界不写在文档里，而是写在代码里：
@@ -166,7 +192,7 @@ MCP 进程以**你的用户权限**运行，所以边界不写在文档里，而
 | 能力 | 边界 |
 |---|---|
 | 读本机文件 | 只允许 PDF，且必须位于 `~/Downloads`、`~/Desktop`、`~/Documents`、系统临时目录（`/tmp`，macOS 是 `/var/folders/...`）之下；`PAPERDB_MCP_LOCAL_ROOTS`（`:` 分隔）可追加。路径先 `resolve()` 再判定，软链逃逸会被拒 |
-| 写本机文件 | 只有页图缓存 `~/.cache/paperdb/mcp`（`PAPERDB_MCP_CACHE_DIR` / `PAPERDB_MCP_CACHE_MB`，默认 256 MiB，按最旧淘汰） |
+| 写本机文件 | 只有页图缓存与更新检测缓存 `~/.cache/paperdb/mcp`（`PAPERDB_MCP_CACHE_DIR` / `PAPERDB_MCP_CACHE_MB` 控页图，默认 256 MiB 按最旧淘汰；`PAPERDB_MCP_UPDATE_TTL` 控更新检测，见上文） |
 | 改文献库 | 一律走 API，权限 = 那枚 token 的 scope；删除/合并/改宿主配置要当前 6 位 TOTP |
 | 装/升级宿主适配器 | 不在工具面上（`paperdb adapter` CLI），不走 MCP |
 

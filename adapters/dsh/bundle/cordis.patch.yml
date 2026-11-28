@@ -21,7 +21,15 @@
 # PAPERDB_MCP_TOOLSETS pins the groups a session starts with; `toolset(
 # op="enable")` loads the rest on demand, and `all` loads everything at once.
 #
-# Placeholders: mcp_command (the paperdb-mcp launcher), base_url (API URL).
+# PAPERDB_MCP_ADAPTER_VERSION is the release this bundle was rendered from:
+# the server compares it with newer releases (at most once per TTL, result
+# cached under the MCP cache root) and appends an `updateNotice` field to
+# tool output so the agent can offer the update to the user. It is rendered
+# from the release version at install time; a dev render falls back to the
+# installed package version, and an empty value means "unknown" (no notices).
+#
+# Placeholders: mcp_command (the paperdb-mcp launcher), base_url (API URL),
+# version (the adapter release being installed).
 - insert:
     - id: paperdb-mcp
       name: '@deepseek-ai/dsh-mcp-client'
@@ -33,6 +41,7 @@
           PAPERDB_MCP_BASE_URL: {{base_url}}
           PAPERDB_MCP_TOKEN_FILE: "~/.config/paperdb/mcp-token"
           PAPERDB_MCP_TOOLSETS: "import,read,organize"
+          PAPERDB_MCP_ADAPTER_VERSION: {{version}}
         toolCallTimeoutMs: 90000
         reconnect:
           enabled: true

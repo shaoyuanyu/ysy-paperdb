@@ -31,7 +31,7 @@ from urllib.parse import quote
 import httpx
 from mcp.server.fastmcp import Context, FastMCP, Image
 
-from paperdb import mcp_config, mcp_local, page_cache
+from paperdb import mcp_config, mcp_local, mcp_update, page_cache
 from paperdb import mcp_toolsets as toolsets
 
 _BASE_URL = mcp_config.base_url()
@@ -71,24 +71,28 @@ mcp = FastMCP(
         "Boundaries: local reads are confined to PDFs under ~/Downloads, "
         "~/Desktop, ~/Documents and the OS temp dir (extend with "
         "PAPERDB_MCP_LOCAL_ROOTS); "
-        "the only local writes are a page-image cache under "
-        "~/.cache/paperdb/mcp. Every library change goes through the API as the "
-        "token's owner; deletes, merges and adapter writes need the user's "
-        "current TOTP, so confirm intent before bulk or destructive edits.\n"
+        "the only local writes are a page-image cache and an update-check "
+        "state file under ~/.cache/paperdb/mcp. Every library change goes "
+        "through the API as the token's owner; deletes, merges and adapter "
+        "writes need the user's current TOTP, so confirm intent before bulk "
+        "or destructive edits.\n"
         "\n"
         "Installation and upgrades happen outside the conversation: the "
         "`paperdb adapter` CLI installs this server into a host, and no tool "
-        "here writes that host's configuration.\n"
+        "here writes that host's configuration. When a newer release exists "
+        "a tool result carries an `updateNotice` field (checked at most once "
+        "per TTL, never per call): ask the user once whether to update — "
+        "wait about 60 seconds for a reply, skip silently if none comes, "
+        "and never start an update without the user's confirmation.\n"
         "\n"
         "When unsure what the library holds, library_stats gives the overview "
         "(totals, unread spread, how much has an extracted PDF)."
     ),
 )
 
-toolsets.bind(mcp)
+toolsets.bind(mcp, wrap=mcp_update.wrap_tool)
 
 
-@mcp.tool()
 async def toolset(
     op: str = "list",
     groups: list[str] | None = None,
@@ -124,6 +128,11 @@ async def toolset(
         return json.dumps(toolsets.report(), ensure_ascii=False)
     except toolsets.ToolsetError as exc:
         return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+
+
+# Registered explicitly (rather than with @mcp.tool) so the always-on tool is
+# wrapped like every group tool and can carry an update notice too.
+mcp.add_tool(mcp_update.wrap_tool(toolset))
 
 
 def _client() -> httpx.AsyncClient:

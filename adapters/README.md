@@ -63,6 +63,20 @@ Install directory resolution, in order: `--dir`, `PAPERDB_ADAPTER_DIR`, the
 host's legacy variable (`PAPERDB_DSH_INTEGRATION_DIR` for DSH), then the host
 default above.
 
+## Update notices (`updateNotice`)
+
+The server checks GitHub for a newer release at most once per TTL (default 6 h,
+`PAPERDB_MCP_UPDATE_TTL`; 0 disables), caches the answer under the MCP cache
+root, and appends an `updateNotice` to the next text tool result so the agent
+can offer the update to the user. It compares against the release the
+integration came from: `paperdb adapter update`/`install_adapter.py` render
+that release version into the bundle as `PAPERDB_MCP_ADAPTER_VERSION`
+(the `{{version}}` placeholder), which is the same version `paperdb adapter
+check` compares. A dev render falls back to the installed package version;
+an empty value means "unknown" and the server stays silent. The agent-facing
+protocol (ask once, wait ~60 s, skip on silence) lives in each host's skill —
+see `adapters/dsh/skills/my-paperdb/SKILL.md`.
+
 ## Tool groups
 
 The server registers tools by workflow group (`import`, `read`, `organize`,

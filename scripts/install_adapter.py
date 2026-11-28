@@ -93,7 +93,9 @@ def main() -> int:
         asset_sha256=adapters.sha256_hex(asset_bytes),
         checksums_url=None,
     )
-    context = adapters.build_context(target, base_url=args.base_url, repo=args.repo)
+    context = adapters.build_context(
+        target, base_url=args.base_url, repo=args.repo, version=version
+    )
     try:
         report = adapters.install(
             adapter, target, verified, release, context=context, dry_run=args.dry_run
