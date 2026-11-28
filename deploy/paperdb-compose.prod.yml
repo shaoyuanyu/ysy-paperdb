@@ -1,7 +1,19 @@
 # Production paperdb stack on the homepage VPS.
-# Run from ~/paperdb:  docker compose -f deploy/paperdb-compose.prod.yml up -d --build
+#
+# Images are built by Alibaba Cloud ACR and pulled by the VPS; do NOT build
+# here (the box cannot reach Docker Hub / PyPI reliably). The release pipeline
+# (.github/workflows/deploy.yml) pulls <registry>/<ns>/ysy-paperdb:<version>,
+# retags it as paperdb:prod, then runs:
+#
+#   cd ~/paperdb
+#   docker compose --env-file .env -f deploy/paperdb-compose.prod.yml up -d
+#
+# `--env-file .env` is required: this file lives in deploy/, so compose's
+# project directory is deploy/ and ~/paperdb/.env is not picked up implicitly.
+#
 # Requires:
-#   - ~/paperdb/.env (600) with POSTGRES_PASSWORD / PAPERDB_SERVICE_TOKEN / PAPERDB_TOKEN_PEPPER
+#   - ~/paperdb/.env (600) with POSTGRES_PASSWORD / PAPERDB_SERVICE_TOKEN /
+#     PAPERDB_TOKEN_PEPPER / PAPERDB_TOTP_SECRET
 #   - external Docker network personal-homepage_web (created by the site compose)
 #   - ./datasets/{ccf-2026.json,cas-2025.json}
 name: paperdb
