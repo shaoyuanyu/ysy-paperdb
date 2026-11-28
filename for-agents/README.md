@@ -17,13 +17,53 @@ for-agents/
         └── SKILL.md           # the agent skill
 ```
 
-Two symlinks point here so DSH discovers both halves without copying:
+## Source vs installed copy
 
-| Link | Points at |
+DSH never reads this directory. It reads the **installed copy** at
+`PAPERDB_DSH_INTEGRATION_DIR` (here: `~/.dsh/paperdb-integration/`), which is
+rendered from this source:
+
+```
+for-agents/                       # SOURCE — edit here, in the repo
+  mcp/dsh-paperdb-mcp/*.yml       #   template, placeholders, no secret
+  skills/my-paperdb/SKILL.md
+
+        │  scripts/install_dsh_integration.py   (local)
+        │  update_dsh_integration               (from a release)
+        ▼
+
+~/.dsh/paperdb-integration/       # INSTALLED — what DSH actually loads
+  mcp/dsh-paperdb-mcp/cordis.patch.yml   # rendered for this machine
+  skills/my-paperdb/SKILL.md             # skill snapshot
+  .paperdb-update/state.json             # version + per-file sha256
+```
+
+Every consumer points at the installed copy — one runtime location, no mixed
+reads:
+
+| Consumer | Link target |
 |---|---|
-| `~/.agents/skills/my-paperdb` | `for-agents/skills/my-paperdb` (every DSH session) |
-| `<repo>/.dsh/skills/my-paperdb` | `../../for-agents/skills/my-paperdb` (sessions in this repo) |
-| `~/.dsh/profiles/<profile>/node_modules/@local/dsh-paperdb-mcp` | `for-agents/mcp/dsh-paperdb-mcp` (the bundle) |
+| `~/.agents/skills/my-paperdb` | `~/.dsh/paperdb-integration/skills/my-paperdb` |
+| `<repo>/.dsh/skills/my-paperdb` | `~/.dsh/paperdb-integration/skills/my-paperdb` |
+| `~/.dsh/profiles/<profile>/node_modules/@local/dsh-paperdb-mcp` | `~/.dsh/paperdb-integration/mcp/dsh-paperdb-mcp` |
+
+The two skill links are absolute and machine-local: on a fresh clone they
+dangle until the integration is installed.
+
+### Development loop
+
+```bash
+# 1. edit for-agents/skills/my-paperdb/SKILL.md or the bundle template
+# 2. render + install into ~/.dsh/paperdb-integration
+.venv/bin/python scripts/install_dsh_integration.py --target ~/.dsh/paperdb-integration
+# 3. skill changes: picked up by new DSH sessions
+#    bundle changes: need a fresh process to see (restart DSH)
+```
+
+`install_dsh_integration.py` builds the same asset the release workflow builds,
+verifies it against its own manifest, renders the template, and writes atomically
+(previous files kept in `.paperdb-update/backups/`, last 3). `--dry-run` shows
+what would change.
 
 ## The token is not in the bundle
 

@@ -139,8 +139,11 @@ asset `paperdb-dsh-<version>.tar.gz` (`.github/workflows/release.yml`, every
 TOTP-gated, verifies the asset digest plus a per-file manifest, and keeps the
 previous files for rollback. The bundle carries no secret: the token lives in
 `~/.config/paperdb/mcp-token` (or wherever `PAPERDB_MCP_TOKEN_FILE` points).
-`~/.agents/skills/my-paperdb` and `.dsh/skills/my-paperdb` are symlinks into
-`for-agents/skills/my-paperdb`, so every DSH session discovers it. Layout,
+DSH reads only the installed copy (`~/.dsh/paperdb-integration/`): both
+`~/.agents/skills/my-paperdb` and `.dsh/skills/my-paperdb` are symlinks to its
+skill, and the profile's `@local/dsh-paperdb-mcp` link points at its bundle.
+Edit `for-agents/`, then render+install locally with
+`python scripts/install_dsh_integration.py`. Layout, the source/installed split,
 publishing and trust model: `for-agents/README.md`. The skill teaches agents
 the import ladder (URL → identifier → BibTeX → PDF → WeChat-article-to-title),
 the verify-before-reporting rules, and the OA PDF acquisition paths.
