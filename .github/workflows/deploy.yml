@@ -12,6 +12,8 @@ name: deploy
 # therefore built by ACR and the VPS only pulls from the domestic registry.
 #
 # Required repo variables: REGISTRY, IMAGE_NAMESPACE (same values as the web repo)
+# The ACR repository must be named after this GitHub repo (`ysy-paperdb`), like
+# the web repo's `ysy-homepage-web`.
 # Required repo secrets:   REGISTRY_USERNAME, REGISTRY_PASSWORD  (ACR credentials)
 #                          VPS_HOST, VPS_USER, VPS_SSH_KEY
 # Optional:                AUTOMERGE_TOKEN — PAT used to push the tag, so ACR's
@@ -77,6 +79,8 @@ jobs:
           REGISTRY: ${{ vars.REGISTRY }}
           NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
         run: |
+          REPO="${GITHUB_REPOSITORY#*/}"     # ysy-paperdb — the ACR repo name
+          echo "REPO=$REPO" >> "$GITHUB_ENV"
           if [ -n "$IN_VERSION" ]; then
             VERSION="$IN_VERSION"
             echo "rollback mode: $VERSION (no tag pushed)"
@@ -86,7 +90,7 @@ jobs:
             echo "version: $VERSION"
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "IMAGE=$REGISTRY/$NAMESPACE/paperdb:$VERSION" >> "$GITHUB_ENV"
+          echo "IMAGE=$REGISTRY/$NAMESPACE/$REPO:$VERSION" >> "$GITHUB_ENV"
           echo "RELEASE_TAG=release-v$VERSION" >> "$GITHUB_ENV"
 
       - name: Login to ACR
@@ -160,11 +164,11 @@ jobs:
 
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
             "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "REGISTRY='$REGISTRY' NS='${{ vars.IMAGE_NAMESPACE }}' VERSION='$VERSION' \
+            "REGISTRY='$REGISTRY' NS='${{ vars.IMAGE_NAMESPACE }}' REPO='$REPO' VERSION='$VERSION' \
              REG_USER='$REGISTRY_USERNAME' REG_PASS='$REGISTRY_PASSWORD' bash -s" <<'REMOTE'
           set -euo pipefail
           echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
-          IMAGE="$REGISTRY/$NS/paperdb:$VERSION"
+          IMAGE="$REGISTRY/$NS/$REPO:$VERSION"
           docker pull "$IMAGE"
           docker tag "$IMAGE" paperdb:prod
 
