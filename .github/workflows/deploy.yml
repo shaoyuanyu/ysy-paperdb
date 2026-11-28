@@ -1,0 +1,112 @@
+name: deploy
+
+# Deploy paperdb to the homepage VPS on every push to main.
+#
+# Topology: the VPS keeps a checkout at ~/paperdb and runs the stack with
+# deploy/paperdb-compose.prod.yml (see docs/deploy.md). Unlike the web repo this
+# does NOT go through ACR: the image is rebuilt on the VPS from the checkout,
+# which keeps the pipeline short (no registry, no cross-border push) and matches
+# how the stack has been operated by hand.
+#
+# Required repository secrets (same names as the web repo, but they must be set
+# on *this* repo — GitHub secrets are per-repository):
+#   VPS_HOST      hostname/IP of the VPS
+#   VPS_USER      ssh user
+#   VPS_SSH_KEY   private key authorized for that user
+# Without them the workflow skips instead of failing red on every push.
+#
+# Rollback: workflow_dispatch with `ref` = the commit/tag to redeploy.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "for-agents/**"      # DSH bundle + skill: not part of the API image
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Rollback: commit/tag to deploy (default: current main)"
+        required: false
+        type: string
+
+concurrency:
+  group: paperdb-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check configuration
+        id: config
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          if [ -z "$VPS_HOST" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VPS_HOST is not set on this repo — skipping deploy."
+            echo "Configure VPS_HOST / VPS_USER / VPS_SSH_KEY to enable auto-deploy."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy over SSH
+        if: steps.config.outputs.ready == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            REF="${{ github.event.inputs.ref || github.sha }}"
+            cd "$HOME/paperdb"
+
+            echo "== fetching $REF =="
+            git fetch --all --prune --tags
+            git checkout --force "$REF" 2>/dev/null || git checkout --force origin/main
+            git clean -fd -e .env -e datasets
+
+            # docker or podman, whichever this host has
+            if command -v docker >/dev/null 2>&1; then
+              COMPOSE="docker compose"
+            else
+              COMPOSE="podman compose"
+            fi
+
+            echo "== rebuilding and restarting =="
+            $COMPOSE -f deploy/paperdb-compose.prod.yml up -d --build
+
+            echo "== waiting for the API =="
+            for i in $(seq 1 60); do
+              if curl -fsS --max-time 3 http://127.0.0.1:9720/readyz >/dev/null 2>&1; then
+                echo "ready after ${i}s"
+                break
+              fi
+              sleep 2
+              if [ "$i" = 60 ]; then
+                echo "::error::API did not become ready in 120s"
+                $COMPOSE -f deploy/paperdb-compose.prod.yml logs --tail=80 paperdb-api || true
+                exit 1
+              fi
+            done
+
+            curl -fsS http://127.0.0.1:9720/healthz >/dev/null
+            echo "== deployed $(git rev-parse --short HEAD) =="
+
+      - name: Smoke test (public)
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          # The API is proxied by nginx; /healthz is the only anonymous route.
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 5 https://library.shaoyuanyu.cn/healthz; then
+              echo; echo "public health OK"; exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::public /healthz did not answer; the VPS checks passed, verify nginx/proxy manually"
