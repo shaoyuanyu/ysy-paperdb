@@ -40,6 +40,12 @@ paperdb-mcp = "paperdb.mcp_server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/paperdb"]
 
+[tool.hatch.build.targets.sdist]
+# .dsh/skills/my-paperdb is a machine-local absolute symlink (see
+# adapters/dsh/README.md): it is meaningless on any other machine and trips
+# the unsafe-symbolic-link validation uv's sdist reader applies in CI.
+exclude = [".dsh"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
