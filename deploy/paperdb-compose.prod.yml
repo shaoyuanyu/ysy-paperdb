@@ -39,6 +39,12 @@ services:
   paperdb-api:
     build:
       context: ..
+      # Build-time package mirrors are machine-local (China VPS): the deploy
+      # workflow exports PIP_INDEX_URL / UV_INDEX_URL, the repo default stays
+      # the official index so local/CI builds remain reproducible.
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
     image: paperdb:prod
     pull_policy: never
     restart: unless-stopped

@@ -85,6 +85,11 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
           set -euo pipefail
           cd ~/paperdb
+          # The VPS is in China: pypi.org / files.pythonhosted.org time out
+          # mid-download, so build against a domestic mirror. Wire format is
+          # standard PEP 503, only used at build time.
+          export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+          export UV_INDEX_URL="${UV_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
           echo "deploying $(cat .deploy-rev 2>/dev/null || echo '?')"
           docker compose --env-file .env -f deploy/paperdb-compose.prod.yml up -d --build
 
