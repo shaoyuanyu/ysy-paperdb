@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "paperdb"
-version = "0.1.0"
+version = "0.2.0"
 description = "CS-native literature library backend (M1)"
 readme = "README.md"
 requires-python = ">=3.12"
